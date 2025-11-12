@@ -1,6 +1,5 @@
 import asyncio
 import random
-import uuid
 from datetime import datetime, timedelta, time
 
 from sqlalchemy import select
@@ -20,7 +19,6 @@ from app.models import (
     User,
     ProductReview,
     SearchHistory,
-    PurchaseHistory,
 )
 
 
@@ -102,7 +100,7 @@ async def generate_owners_shops(session: AsyncSession):
         phone = f"+91{random.randint(7000000000, 9999999999)}"
         if email in existing_emails or phone in existing_phones:
             continue
-        owners.append(ShopOwner(owner_id=uuid.uuid4(), owner_name=f"{fname} {lname}", email=email, phone=phone, password_hash="dummy"))
+        owners.append(ShopOwner(owner_name=f"{fname} {lname}", email=email, phone=phone))
         existing_emails.add(email)
         existing_phones.add(phone)
     if owners:
@@ -113,30 +111,23 @@ async def generate_owners_shops(session: AsyncSession):
     shops: list[Shop] = []
     addresses: list[ShopAddress] = []
     timings: list[ShopTiming] = []
-    gstins = set((await session.execute(select(Shop.gstin))).scalars().all())
     for city, cfg in CITIES.items():
         for i in range(10):
             owner = random.choice(owners) if owners else (await session.execute(select(ShopOwner))).scalars().first()
-            gstin = None
-            while True:
-                gstin = f"{random.randint(10,99)}ABCDE{random.randint(1000,9999)}F1Z{random.randint(0,9)}"
-                if gstin not in gstins:
-                    gstins.add(gstin)
-                    break
-            shop = Shop(shop_id=uuid.uuid4(), shop_name=f"{city} Bazaar {i+1}", owner_id=owner.owner_id if owner else None, gstin=gstin, created_at=rand_dt_within_2y())
+            shop = Shop(shop_name=f"{city} Bazaar {i+1}", owner_id=owner.owner_id if owner else None, created_at=rand_dt_within_2y())
             shops.append(shop)
             # Address
-            pincode = random.choice(cfg["pincodes"])
-            landmark = random.choice(cfg["landmarks"])
-            area = random.choice(cfg["areas"])
-            lat, lon = random.choice(cfg["latlon"])
-            addresses.append(ShopAddress(address_id=uuid.uuid4(), shop_id=shop.shop_id, city=city, country="India", pincode=pincode, landmark=landmark, area=area, latitude=lat, longitude=lon))
+            pincode = random.choice(cfg["pincodes"]) 
+            landmark = random.choice(cfg["landmarks"]) 
+            area = random.choice(cfg["areas"]) 
+            lat, lon = random.choice(cfg["latlon"]) 
+            addresses.append(ShopAddress(shop_id=shop.shop_id, city=city, country="India", pincode=pincode, landmark=landmark, area=area, latitude=lat, longitude=lon))
             # Timings for 7 days
             days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
             for d in days:
                 ot = time(hour=random.choice([9, 10, 11]))
                 ct = time(hour=random.choice([18, 19, 20]))
-                timings.append(ShopTiming(timing_id=uuid.uuid4(), shop_id=shop.shop_id, day=d, open_time=ot, close_time=ct))
+                timings.append(ShopTiming(shop_id=shop.shop_id, day=d, open_time=ot, close_time=ct))
     if shops:
         session.add_all(shops)
         await session.flush()
@@ -156,12 +147,15 @@ async def generate_products(session: AsyncSession, categories: list[ProductCateg
         category = random.choice(categories)
         color = random.choice(["Black", "White", "Blue", "Red", "Green"])
         name = f"{brand} Item {i+1}"
-        p_id = uuid.uuid4()
-        p = Product(product_id=p_id, product_name=name, category_id=category.category_id, brand=brand, description=f"{brand} {name}", color=color, created_at=rand_dt_within_2y())
+        p = Product(product_name=name, category_id=category.category_id, brand=brand, description=f"{brand} {name}", color=color, created_at=rand_dt_within_2y())
         products.append(p)
-        images.append(ProductImage(image_id=uuid.uuid4(), product_id=p_id, image_url=f"https://img.example.com/{p_id}.jpg"))
+        # image_url can be any placeholder; FK will attach after flush
+        images.append(ProductImage(product_id=0, image_url=f""))
     session.add_all(products)
     await session.flush()
+    # Now attach images to created products deterministically
+    for p in products:
+        images.append(ProductImage(product_id=p.product_id, image_url=f"https://img.example.com/{p.product_id}.jpg"))
     session.add_all(images)
     await session.flush()
 
@@ -173,7 +167,7 @@ async def generate_products(session: AsyncSession, categories: list[ProductCateg
         for shop in random.sample(shops, k=min(3, len(shops))):
             price = round(random.uniform(100, 5000), 2)
             stock = random.randint(0, 200)
-            links.append(ShopProduct(shop_product_id=uuid.uuid4(), shop_id=shop.shop_id, product_id=p.product_id, price=price, stock=stock))
+            links.append(ShopProduct(shop_id=shop.shop_id, product_id=p.product_id, price=price, stock=stock))
     session.add_all(links)
     await session.flush()
 
@@ -199,15 +193,8 @@ async def generate_users_and_activity(session: AsyncSession):
     # Fetch products and shops and existing links for purchases
     products = (await session.execute(select(Product))).scalars().all()
     shops = (await session.execute(select(Shop))).scalars().all()
-    shop_products = (await session.execute(select(ShopProduct))).scalars().all()
-    # Map for quick purchase FK validation
-    sp_by_shop: dict[uuid.UUID, list[ShopProduct]] = {}
-    for sp in shop_products:
-        sp_by_shop.setdefault(sp.shop_id, []).append(sp)
-
     reviews: list[ProductReview] = []
     searches: list[SearchHistory] = []
-    purchases: list[PurchaseHistory] = []
     for u in users:
         # Search history
         for _ in range(random.randint(1, 3)):
@@ -217,25 +204,12 @@ async def generate_users_and_activity(session: AsyncSession):
         for p in random.sample(products, k=min(3, len(products))):
             rating = round(random.uniform(2.5, 5.0), 1)
             reviews.append(ProductReview(user_id=u.user_id, product_id=p.product_id, rating=rating, review_text=f"Review for {p.product_name}", created_at=rand_dt_within_2y()))
-        # Purchases: pick a shop that sells a sampled product
-        for _ in range(random.randint(1, 2)):
-            shop = random.choice(shops)
-            shop_links = sp_by_shop.get(shop.shop_id, [])
-            if not shop_links:
-                continue
-            sp = random.choice(shop_links)
-            qty = random.randint(1, 5)
-            total = float(sp.price or 0) * qty
-            purchases.append(PurchaseHistory(user_id=u.user_id, shop_id=shop.shop_id, product_id=sp.product_id, quantity=qty, total_price=total, purchased_at=rand_dt_within_2y()))
 
     if reviews:
         session.add_all(reviews)
         await session.flush()
     if searches:
         session.add_all(searches)
-        await session.flush()
-    if purchases:
-        session.add_all(purchases)
         await session.flush()
 
 

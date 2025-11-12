@@ -1,5 +1,4 @@
 from fastapi import Depends, HTTPException, Request
-import uuid
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,7 +14,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/owner/login", auto_erro
 oauth2_scheme_user = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
 
-async def get_current_owner(request: Request, token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_session)) -> ShopOwner:
+async def get_current_owner(request: Request, token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_session)):
     try:
         tok = token or request.cookies.get("owner_access_token")
         payload = jwt.decode(tok, settings.secret_key, algorithms=[settings.algorithm])
@@ -23,34 +22,48 @@ async def get_current_owner(request: Request, token: str = Depends(oauth2_scheme
         role = payload.get("role")
         if role and role != "owner":
             raise HTTPException(status_code=403, detail="Invalid role for owner access")
-        # Expect UUID in token subject
-        owner_id = uuid.UUID(str(sub))
-    except (JWTError, ValueError, TypeError):
+        oid_hex = str(sub)
+        oid_bytes = bytes.fromhex(oid_hex)
+    except (JWTError, ValueError, TypeError, AttributeError):
         raise HTTPException(status_code=401, detail="Invalid authentication token")
-    res = await db.execute(select(ShopOwner).where(ShopOwner.owner_id == owner_id))
-    owner = res.scalar_one_or_none()
-    if not owner:
+    from sqlalchemy import text
+    row = (await db.execute(text("SELECT owner_id, owner_name, email, phone FROM Shop_Owners WHERE owner_id = :oid"), {"oid": oid_bytes})).first()
+    if not row:
         raise HTTPException(status_code=401, detail="Owner not found")
-    return owner
+    return {
+        "owner_id": oid_hex,
+        "owner_name": row[1],
+        "email": row[2],
+        "phone": row[3],
+    }
 
 
-async def get_current_user(request: Request, token: str = Depends(oauth2_scheme_user), db: AsyncSession = Depends(get_session)) -> User:
+async def get_current_user(request: Request, token: str = Depends(oauth2_scheme_user), db: AsyncSession = Depends(get_session)):
     try:
         tok = token or request.cookies.get("user_access_token")
         payload = jwt.decode(tok, settings.secret_key, algorithms=[settings.algorithm])
         sub = payload.get("sub")
-        # optional role check
         role = payload.get("role")
         if role and role != "user":
             raise HTTPException(status_code=403, detail="Invalid role for user access")
-        user_id = uuid.UUID(str(sub))
-    except (JWTError, ValueError, TypeError):
+        uid_hex = str(sub)
+        uid_bytes = bytes.fromhex(uid_hex)
+    except (JWTError, ValueError, TypeError, AttributeError):
         raise HTTPException(status_code=401, detail="Invalid authentication token")
-    res = await db.execute(select(User).where(User.user_id == user_id))
-    user = res.scalar_one_or_none()
-    if not user:
+    from sqlalchemy import text
+    row = (await db.execute(
+        text("SELECT user_id, name, email, phone, created_at FROM Users WHERE user_id = :uid"),
+        {"uid": uid_bytes},
+    )).first()
+    if not row:
         raise HTTPException(status_code=401, detail="User not found")
-    return user
+    return {
+        "user_id": uid_hex,
+        "name": row[1],
+        "email": row[2],
+        "phone": row[3],
+        "created_at": row[4],
+    }
 
 
 async def get_current_admin(token: str = Depends(oauth2_scheme_user), db: AsyncSession = Depends(get_session)) -> Admin:
@@ -75,7 +88,7 @@ async def get_current_admin(token: str = Depends(oauth2_scheme_user), db: AsyncS
     return admin
 
 
-async def ensure_owner_of_shop(shop_id: uuid.UUID, owner: ShopOwner, db: AsyncSession) -> None:
+async def ensure_owner_of_shop(shop_id: int, owner: ShopOwner, db: AsyncSession) -> None:
     res = await db.execute(select(Shop).where(Shop.shop_id == shop_id))
     shop = res.scalar_one_or_none()
     if not shop:

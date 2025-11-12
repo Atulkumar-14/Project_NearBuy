@@ -1,14 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
-import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.db.session import get_session
 from app.core.auth import get_current_owner
-from app.models import Product, ShopProduct, Shop, ProductImage, AuthLog
+from app.models import Product, ShopProduct, Shop, ShopAddress, ProductImage, Log, ProductCreate, ProductRead
 from app.core.imagekit import ImageKitClient
-from app.schemas.product import ProductCreate, ProductRead
-from app.schemas.shop import ShopPrice
+from sqlalchemy.exc import IntegrityError
 
 
 router = APIRouter()
@@ -16,46 +14,91 @@ router = APIRouter()
 
 @router.post("/", response_model=ProductRead)
 async def create_product(payload: ProductCreate, db: AsyncSession = Depends(get_session), owner=Depends(get_current_owner)):
-    product = Product(
-        product_name=payload.product_name,
-        category_id=payload.category_id,
-        brand=payload.brand,
-        description=payload.description,
-        color=payload.color,
-    )
-    db.add(product)
-    await db.commit()
-    await db.refresh(product)
-    return product
+    name = (payload.product_name or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Product name is required")
+    cat_key = str(payload.category_id) if payload.category_id is not None else None
+    try:
+        prow = (await db.execute(text(
+            "INSERT INTO Products (product_id, product_name, category_key, brand, description, color, created_at) "
+            "VALUES (randomblob(16), :name, :cat_key, :brand, :desc, :color, CURRENT_TIMESTAMP) "
+            "RETURNING product_id, product_name, category_key, brand, description, color"
+        ), {"name": name, "cat_key": cat_key, "brand": payload.brand, "desc": payload.description, "color": payload.color})).first()
+        if not prow:
+            raise HTTPException(status_code=500, detail="Failed to create product")
+        await db.commit()
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="Product already exists")
+    pid, pname, pcat, pbrand, pdesc, pcolor = prow
+    return {
+        "product_id": (pid.hex() if isinstance(pid, (bytes, bytearray)) else pid),
+        "product_name": pname,
+        "brand": pbrand,
+        "description": pdesc,
+        "color": pcolor,
+        "category_id": pcat,
+    }
 
 
-@router.get("/", response_model=list[ProductRead])
+@router.get("/")
 async def list_products(db: AsyncSession = Depends(get_session)):
-    res = await db.execute(select(Product))
-    return res.scalars().all()
-
-
-@router.get("/{product_id}/prices", response_model=list[ShopPrice])
-async def price_comparison(product_id: uuid.UUID, db: AsyncSession = Depends(get_session)):
-    res = await db.execute(
-        select(ShopProduct, Shop).join(Shop, Shop.shop_id == ShopProduct.shop_id).where(ShopProduct.product_id == product_id)
-    )
+    res = await db.execute(text(
+        "SELECT product_id, product_name, brand, description, color FROM Products ORDER BY created_at DESC"
+    ))
     rows = res.all()
-    output = [
-        ShopPrice(shop_id=s.Shop.shop_id, shop_name=s.Shop.shop_name, price=float(s.ShopProduct.price) if s.ShopProduct.price else None, stock=s.ShopProduct.stock)
-        for s in [type("Row", (), {"ShopProduct": r[0], "Shop": r[1]}) for r in rows]
-    ]
-    # Sort by price ascending, treating None as high
-    output.sort(key=lambda x: (x.price is None, x.price))
-    return output
+    items = []
+    for pid, pname, pbrand, pdesc, pcolor in rows:
+        items.append({
+            "product_id": (pid.hex() if isinstance(pid, (bytes, bytearray)) else pid),
+            "product_name": pname,
+            "brand": pbrand,
+            "description": pdesc,
+            "color": pcolor,
+            "category_id": None,
+        })
+    return items
 
-@router.get("/{product_id}")
-async def product_detail(product_id: uuid.UUID, db: AsyncSession = Depends(get_session)):
-    res = await db.execute(select(Product).where(Product.product_id == product_id))
+
+# ProductPrice endpoints removed to comply strictly with db.txt
+
+@router.get("/id/{product_id}")
+async def product_detail(product_id: str, db: AsyncSession = Depends(get_session)):
+    pid_bytes = None
+    pid_int = None
+    try:
+        pid_bytes = bytes.fromhex(product_id)
+    except ValueError:
+        try:
+            pid_int = int(product_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid product id format")
+    if pid_bytes is not None:
+        from sqlalchemy import text
+        row = (await db.execute(text(
+            "SELECT product_id, product_name, brand, color, description "
+            "FROM Products WHERE product_id = :pid"
+        ), {"pid": pid_bytes})).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Product not found")
+        img = await db.execute(select(ProductImage).where(ProductImage.product_id == pid_bytes))
+        image_url = None
+        first = img.scalars().first()
+        if first:
+            image_url = first.image_url
+        return {
+            "product_id": product_id,
+            "product_name": row[1],
+            "brand": row[2],
+            "color": row[3],
+            "description": row[4],
+            "image_url": image_url,
+        }
+    # integer fallback
+    res = await db.execute(select(Product).where(Product.product_id == pid_int))
     product = res.scalar_one_or_none()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
-    img = await db.execute(select(ProductImage).where(ProductImage.product_id == product_id))
+    img = await db.execute(select(ProductImage).where(ProductImage.product_id == pid_int))
     image_url = None
     first = img.scalars().first()
     if first:
@@ -69,10 +112,14 @@ async def product_detail(product_id: uuid.UUID, db: AsyncSession = Depends(get_s
         "image_url": image_url,
     }
 
+@router.get("/{product_id}")
+async def product_detail_alias(product_id: str, db: AsyncSession = Depends(get_session)):
+    return await product_detail(product_id, db)
+
 
 @router.post("/{product_id}/image")
 async def upload_product_image(
-    product_id: uuid.UUID,
+    product_id: int,
     file: UploadFile | None = File(default=None),
     file_url: str | None = Form(default=None),
     file_name: str | None = Form(default=None),
@@ -86,14 +133,12 @@ async def upload_product_image(
         raise HTTPException(status_code=404, detail="Product not found")
     # Log attempted upload and reject
     try:
-        db.add(AuthLog(
-            principal_type="user",
-            principal_id=None,
-            event_type="image_upload_attempt",
-            success=False,
-            reason="uploads_disabled",
-            ip=request.client.host if request and request.client else None,
-            user_agent=request.headers.get("user-agent") if request else None,
+        db.add(Log(
+            user_id=None,
+            action_type="image_upload_attempt",
+            description="uploads_disabled",
+            ip_address=(request.client.host if request and request.client else None),
+            status_code=403,
         ))
         await db.commit()
     except Exception:
@@ -105,7 +150,7 @@ async def upload_product_image(
 @router.post("/create_with_image")
 async def create_product_with_image(
     product_name: str = Form(...),
-    category_id: uuid.UUID | None = Form(default=None),
+    category_id: int | None = Form(default=None),
     brand: str | None = Form(default=None),
     description: str | None = Form(default=None),
     color: str | None = Form(default=None),
@@ -122,14 +167,12 @@ async def create_product_with_image(
     # Reject any image upload attempts
     if file or file_url:
         try:
-            db.add(AuthLog(
-                principal_type="user",
-                principal_id=None,
-                event_type="image_upload_attempt",
-                success=False,
-                reason="uploads_disabled",
-                ip=request.client.host if request and request.client else None,
-                user_agent=request.headers.get("user-agent") if request else None,
+            db.add(Log(
+                user_id=None,
+                action_type="image_upload_attempt",
+                description="uploads_disabled",
+                ip_address=(request.client.host if request and request.client else None),
+                status_code=403,
             ))
             await db.commit()
         except Exception:
@@ -144,30 +187,34 @@ async def create_product_with_image(
 @router.get("/in_city")
 async def products_in_city(city: str, db: AsyncSession = Depends(get_session)):
     # Products available (via ShopProduct) in shops located in the given city
-    # Case-insensitive, partial city match; require stock > 0
-    from app.models.shop import ShopAddress
+    # Prefer Shops.city; fall back to Shop_Address.city when Shops.city is NULL; require available stock
+    from app.models.shop import Shop, ShopAddress
+    from sqlalchemy import or_
     stmt = (
-        select(Product, ShopProduct, ShopAddress)
+        select(Product, ShopProduct, Shop, ShopAddress)
         .join(ShopProduct, ShopProduct.product_id == Product.product_id)
-        .join(ShopAddress, ShopAddress.shop_id == ShopProduct.shop_id)
-        .where(ShopAddress.city.ilike(f"%{city}%"))
-        .where(ShopProduct.stock.isnot(None))
-        .where(ShopProduct.stock > 0)
+        .join(Shop, Shop.shop_id == ShopProduct.shop_id)
+        .join(ShopAddress, ShopAddress.shop_id == ShopProduct.shop_id, isouter=True)
+        .where(or_(Shop.city.ilike(f"%{city}%"), ShopAddress.city.ilike(f"%{city}%")))
+        .where((ShopProduct.stock.is_not(None)) & (ShopProduct.stock > 0))
     )
     res = await db.execute(stmt)
     rows = res.all()
     out = []
-    for p, sp, addr in rows:
+    for p, sp, s, addr in rows:
+        pid = p.product_id
+        if isinstance(pid, (bytes, bytearray)):
+            pid = pid.hex()
         out.append({
-            "product_id": p.product_id,
+            "product_id": pid,
             "product_name": p.product_name,
             "brand": p.brand,
             "price": float(sp.price) if sp.price is not None else None,
             "stock": sp.stock,
-            "city": addr.city,
+            "city": getattr(addr, "city", None),
         })
     # deduplicate by product_id keeping the lowest price
-    dedup: dict[uuid.UUID, dict] = {}
+    dedup: dict[int, dict] = {}
     for item in out:
         pid = item["product_id"]
         if pid not in dedup or (
@@ -175,3 +222,53 @@ async def products_in_city(city: str, db: AsyncSession = Depends(get_session)):
         ):
             dedup[pid] = item
     return list(dedup.values())
+
+
+@router.get("/{product_id}/prices")
+async def product_prices(product_id: str, db: AsyncSession = Depends(get_session)):
+    pid_bytes = None
+    pid_int = None
+    try:
+        pid_bytes = bytes.fromhex(product_id)
+    except ValueError:
+        try:
+            pid_int = int(product_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid product id format")
+    if pid_bytes is not None:
+        from sqlalchemy import text
+        rows = (await db.execute(text(
+            "SELECT sp.shop_id, s.shop_name, sp.price, sp.stock "
+            "FROM Shop_Product sp JOIN Shops s ON sp.shop_id = s.shop_id "
+            "WHERE sp.product_id = :pid"
+        ), {"pid": pid_bytes})).all()
+        out = []
+        for sid, sname, price, stock in rows:
+            out.append({
+                "shop_id": (sid.hex() if isinstance(sid, (bytes, bytearray)) else sid),
+                "shop_name": sname,
+                "price": float(price) if price is not None else None,
+                "stock": stock,
+            })
+        return sorted(out, key=lambda x: (x["price"] is None, x["price"] or 0.0))
+    # integer fallback
+    stmt = (
+        select(ShopProduct, Shop, ShopAddress)
+        .join(Shop, Shop.shop_id == ShopProduct.shop_id)
+        .join(ShopAddress, ShopAddress.shop_id == ShopProduct.shop_id, isouter=True)
+        .where(ShopProduct.product_id == pid_int)
+    )
+    res = await db.execute(stmt)
+    rows = res.all()
+    out = []
+    for sp, s, addr in rows:
+        out.append({
+            "shop_id": s.shop_id,
+            "shop_name": s.shop_name,
+            "price": float(sp.price) if sp.price is not None else None,
+            "stock": sp.stock,
+            "city": getattr(addr, "city", None),
+            "area": getattr(addr, "area", None),
+            "shop_image": s.shop_image,
+        })
+    return sorted(out, key=lambda x: (x["price"] is None, x["price"] or 0.0))

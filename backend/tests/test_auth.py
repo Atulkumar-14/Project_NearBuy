@@ -5,17 +5,13 @@ from backend.main import app
 client = TestClient(app)
 
 
-def test_owner_login_requires_both_fields():
-    # Missing owner_id
-    r = client.post('/api/auth/owner/login', json={'password': 'x'})
-    assert r.status_code == 422 or r.status_code == 400
-    # Missing password
-    r2 = client.post('/api/auth/owner/login', json={'owner_id': 1})
-    assert r2.status_code == 422 or r2.status_code == 400
+def test_owner_login_requires_email():
+    r = client.post('/api/auth/owner/login', json={})
+    assert r.status_code in (422, 400)
 
 
-def test_owner_login_invalid_credentials():
-    r = client.post('/api/auth/owner/login', json={'owner_id': 999999, 'password': 'bad'})
+def test_owner_login_invalid_email():
+    r = client.post('/api/auth/owner/login', json={'email': 'noone@example.com'})
     assert r.status_code in (401, 404)
 
 

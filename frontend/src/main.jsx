@@ -7,22 +7,28 @@ import ErrorBoundary from './components/ErrorBoundary.jsx'
 import axios from 'axios'
 import { AuthProvider } from './components/AuthProvider.jsx'
 
-// Send cookies with API requests and auto-refresh on 401
+// Global axios defaults: base URL and credentials
+axios.defaults.baseURL = 'http://localhost:8000'
 axios.defaults.withCredentials = true
+let __refreshing = null
 axios.interceptors.response.use(
   (res) => res,
   async (error) => {
     const status = error?.response?.status
-    const original = error.config
-    if (status === 401 && !original?._retry) {
+    const original = error.config || {}
+    const url = original.url || ''
+    const isProbe = url.endsWith('/api/users/me') || url.endsWith('/api/owners/me')
+    const isAuthEndpoint = url.includes('/api/auth/refresh') || url.includes('/api/auth/login') || url.includes('/api/auth/owner/login')
+    if (status === 401 && !original._retry && !isProbe && !isAuthEndpoint) {
       original._retry = true
       try {
-        await axios.post('http://localhost:8000/api/auth/refresh')
+        __refreshing = __refreshing || axios.post('/api/auth/refresh', {}, { withCredentials: true }).finally(() => { __refreshing = null })
+        await __refreshing
         return axios(original)
       } catch (e) {
-        // Refresh failed; notify UI and redirect to login
         window.dispatchEvent(new CustomEvent('auth:logout'))
-        if (!window.location.pathname.startsWith('/login')) {
+        const p = window.location.pathname
+        if (!p.startsWith('/login') && !p.startsWith('/owner/login')) {
           window.location.assign('/login')
         }
       }

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import axios from 'axios'
 import { useParams, useNavigate } from 'react-router-dom'
+import { useAuth } from '../components/AuthProvider.jsx'
 
 const API_BASE = 'http://localhost:8000/api'
 
@@ -9,17 +10,24 @@ export default function Shop() {
   const [shop, setShop] = useState(null)
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
   const navigate = useNavigate()
-  const isOwner = !!localStorage.getItem('owner_token')
+  const { owner } = useAuth()
+  const isOwner = !!owner
 
   useEffect(() => {
     const run = async () => {
       setLoading(true)
+      setError('')
       try {
-        const shopRes = await axios.get(`${API_BASE}/shops/${shopId}`)
+        const shopRes = await axios.get(`${API_BASE}/shops/${shopId}`, { withCredentials: true })
         setShop(shopRes.data)
-        const res = await axios.get(`${API_BASE}/shops/${shopId}/products`)
+        const res = await axios.get(`${API_BASE}/shops/${shopId}/products`, { withCredentials: true })
         setItems(res.data || [])
+      } catch (e) {
+        const d = e?.response?.data
+        const msg = (typeof d?.detail === 'string' ? d.detail : 'Failed to load products')
+        setError(msg)
       } finally {
         setLoading(false)
       }
@@ -66,6 +74,7 @@ export default function Shop() {
         </div>
       )}
       {loading && <div>Loading products...</div>}
+      {error && <div className="p-2 rounded border bg-red-50 text-red-700 text-sm">{error}</div>}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {items.map(item => (
           <div key={`${item.product_id}-${item.shop_id || shopId}`} className="rounded-2xl overflow-hidden bg-white border shadow-sm">
@@ -76,9 +85,9 @@ export default function Shop() {
                 {(item.product_name || '?').slice(0,1).toUpperCase()}
               </div>
             )}
-            <div className="p-4">
-              <div className="font-semibold text-lg">{item.product_name}</div>
-              <div className="text-sm text-gray-600">{item.brand}</div>
+              <div className="p-4">
+              <div className="font-bold text-black text-lg">{item.product_name}</div>
+              <div className="text-sm text-black font-semibold">{item.brand}</div>
               <div className="mt-2">
                 <span className="text-xl font-bold">₹{item.price}</span>
                 {item.stock != null && (

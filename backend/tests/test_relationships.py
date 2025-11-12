@@ -1,31 +1,41 @@
 import asyncio
 from sqlalchemy import select
-from backend.main import app
 from app.db.session import SessionLocal, init_db
-from app.models import PurchaseHistory, User, Shop, Product
+from app.models import ProductReview, ShopProduct
 
 
-async def _insert_invalid_purchase():
+async def _insert_invalid_shop_product():
     async with SessionLocal() as session:
         async with session.begin():
-            # Ensure IDs that likely do not exist
-            ph = PurchaseHistory(user_id=999999, shop_id=999999, product_id=999999, quantity=1, total_price=100.0)
-            session.add(ph)
+            sp = ShopProduct(shop_id=999999, product_id=999999, price=100.0, stock=1)
+            session.add(sp)
+
+
+async def _insert_invalid_review():
+    async with SessionLocal() as session:
+        async with session.begin():
+            rv = ProductReview(user_id=999999, product_id=999999, rating=4.0, review_text="bad fk")
+            session.add(rv)
 
 
 def test_fk_constraints_block_invalid_inserts():
-    # Initialize database
     asyncio.run(init_db())
-    # Attempt invalid insert and expect failure due to FK constraints
     try:
-        asyncio.run(_insert_invalid_purchase())
-        # If it didn't raise, ensure row not inserted
-        async def _count():
+        asyncio.run(_insert_invalid_shop_product())
+        async def _count_sp():
             async with SessionLocal() as session:
-                res = await session.execute(select(PurchaseHistory).where(PurchaseHistory.user_id == 999999))
+                res = await session.execute(select(ShopProduct).where(ShopProduct.shop_id == 999999))
                 return len(res.scalars().all())
-        count = asyncio.run(_count())
-        assert count == 0
+        assert asyncio.run(_count_sp()) == 0
     except Exception:
-        # Integrity errors are acceptable; indicates FK constraints are enforced
+        assert True
+
+    try:
+        asyncio.run(_insert_invalid_review())
+        async def _count_rv():
+            async with SessionLocal() as session:
+                res = await session.execute(select(ProductReview).where(ProductReview.user_id == 999999))
+                return len(res.scalars().all())
+        assert asyncio.run(_count_rv()) == 0
+    except Exception:
         assert True

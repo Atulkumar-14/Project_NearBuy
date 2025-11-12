@@ -18,6 +18,7 @@ import ShopAddProductLanding from './pages/ShopAddProductLanding'
 import OwnerLogin from './pages/OwnerLogin'
 import { RequireOwnerAuth, RequireUserAuth } from './routes/guards'
 import ShopkeeperDashboard from './modules/shopkeeper/Dashboard'
+import OwnerProducts from './modules/shopkeeper/OwnerProducts'
 import ShopkeeperProfile from './modules/shopkeeper/Profile'
 import UserDashboard from './modules/user/Dashboard'
 import UserProfile from './modules/user/Profile'
@@ -41,12 +42,13 @@ export default function App() {
           <Route path="/shops" element={<Shops />} />
           <Route path="/shops/add-product" element={<ShopAddProductLanding />} />
           <Route path="/owner/login" element={<OwnerLogin />} />
+          <Route path="/shopkeeper/products" element={<RequireOwnerAuth><OwnerProducts /></RequireOwnerAuth>} />
           <Route path="/shopkeeper/dashboard" element={<RequireOwnerAuth><ShopkeeperDashboard /></RequireOwnerAuth>} />
           <Route path="/shopkeeper/profile" element={<RequireOwnerAuth><ShopkeeperProfile /></RequireOwnerAuth>} />
           <Route path="/shops/register" element={<ShopRegister />} />
           <Route path="/shops/:shopId" element={<Shop />} />
           <Route path="/shops/:shopId/manage" element={<ShopManage />} />
-          <Route path="/shops/:shopId/add-product" element={<ShopAddProduct />} />
+          <Route path="/shops/:shopId/add-product" element={<RequireOwnerAuth><ShopAddProduct /></RequireOwnerAuth>} />
           <Route path="/products/:productId" element={<Product />} />
           <Route path="/admin" element={<Admin />} />
           <Route path="/login" element={<Login />} />

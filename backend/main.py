@@ -13,10 +13,45 @@ app = FastAPI(title="Nearbuy API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|192\.168\.[0-9]{1,3}\.[0-9]{1,3}):[0-9]+",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def cors_and_admin_preflight(request: Request, call_next):
+    origin = request.headers.get("origin")
+    if request.method == "OPTIONS" and request.url.path.startswith("/api/admin"):
+        from fastapi.responses import Response as FastResp
+        resp = FastResp(status_code=200)
+        if origin in (settings.admin_origins or []):
+            resp.headers["Access-Control-Allow-Origin"] = origin
+            resp.headers["Access-Control-Allow-Credentials"] = "true"
+        resp.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+        resp.headers.setdefault("Vary", "Origin")
+        return resp
+    response = await call_next(request)
+    try:
+        import re
+        if request.url.path.startswith("/api/admin"):
+            if origin in (settings.admin_origins or []):
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Allow-Credentials"] = "true"
+                response.headers.setdefault("Vary", "Origin")
+        else:
+            allowed = origin and (
+                origin in (settings.cors_origins or [])
+                or re.match(r"https?://(localhost|127\.0\.0\.1|192\.168\.[0-9]{1,3}\.[0-9]{1,3}):[0-9]+", origin)
+            )
+            if allowed:
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Allow-Credentials"] = "true"
+                response.headers.setdefault("Vary", "Origin")
+    except Exception:
+        pass
+    return response
 
 
 @app.on_event("startup")
@@ -64,6 +99,7 @@ app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(users.router, prefix="/api/users", tags=["users"])
 app.include_router(shops.router, prefix="/api/shops", tags=["shops"])
 app.include_router(products.router, prefix="/api/products", tags=["products"])
+app.include_router(products.router, prefix="/api/product", tags=["products"])  # alias for compatibility
 app.include_router(reviews.router, prefix="/api/reviews", tags=["reviews"])
 app.include_router(search.router, prefix="/api/search", tags=["search"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])

@@ -6,11 +6,8 @@ export default function ShopAddProductLanding() {
   const [shopId, setShopId] = useState('')
 
   useEffect(() => {
-    const token = localStorage.getItem('owner_token')
-    if (!token) {
-      navigate('/owner/login?redirect=/shops/add-product')
-    }
-  }, [navigate])
+    // rely on cookie-based auth; leave navigation as-is
+  }, [])
 
   const go = () => {
     const id = String(shopId || '').trim()

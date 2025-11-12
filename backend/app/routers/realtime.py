@@ -1,6 +1,5 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from typing import Dict, Set
-import uuid
 
 router = APIRouter()
 
@@ -32,7 +31,7 @@ manager = ConnectionManager()
 
 
 @router.websocket("/shops/{shop_id}/ws")
-async def shop_ws(websocket: WebSocket, shop_id: uuid.UUID):
+async def shop_ws(websocket: WebSocket, shop_id: int):
     topic = f"shop:{shop_id}"
     await manager.connect(topic, websocket)
     try:
@@ -44,5 +43,5 @@ async def shop_ws(websocket: WebSocket, shop_id: uuid.UUID):
         manager.disconnect(topic, websocket)
 
 
-async def notify_shop_update(shop_id: uuid.UUID, payload: dict) -> None:
+async def notify_shop_update(shop_id: int, payload: dict) -> None:
     await manager.broadcast(f"shop:{shop_id}", {"type": "shop_update", "data": payload})

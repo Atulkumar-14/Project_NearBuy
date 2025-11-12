@@ -1,12 +1,14 @@
 import React, { useState } from 'react'
 import axios from 'axios'
 import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useAuth } from '../components/AuthProvider.jsx'
 
 const API_BASE = 'http://localhost:8000/api'
 
 export default function OwnerLogin() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
+  const { refresh } = useAuth()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
@@ -42,6 +44,7 @@ export default function OwnerLogin() {
         localStorage.setItem('owner_token', token)
         axios.defaults.headers.common['Authorization'] = `Bearer ${token}`
       }
+      await refresh()
       navigate(redirectTo)
     } catch (e) {
       let message = 'Login failed'

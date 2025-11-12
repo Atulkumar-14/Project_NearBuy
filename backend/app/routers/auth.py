@@ -1,6 +1,5 @@
 from datetime import timedelta, datetime
 from fastapi import APIRouter, Depends, HTTPException, Response, Request
-import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from jose import JWTError, jwt
@@ -8,10 +7,7 @@ from jose import JWTError, jwt
 from app.core.config import settings
 from app.core.security import create_access_token, verify_password, get_password_hash
 from app.db.session import get_session
-from app.models import User, Admin, ShopOwner, UserVerification, OwnerSecurity, AuthLog
-from app.schemas.user import UserCreate, UserLogin, UserRead
-from app.schemas.auth import Token, AdminLogin
-from app.schemas.owner import OwnerLogin
+from app.models import User, Admin, AdminLogin, ShopOwner, Log, UserCreate, UserLogin, UserRead, Token, OwnerLogin
 from app.core.notify import send_email, send_sms
 import logging
 try:
@@ -22,43 +18,88 @@ except Exception:
 
 router = APIRouter()
 
+# Simple per-IP rate limiter for auth endpoints: max 10 requests/minute
+from collections import deque
+import time
+_AUTH_WINDOW_SECONDS = 60
+_AUTH_MAX_REQUESTS = 10
+_ip_events: dict[str, deque] = {}
 
-@router.post("/register", response_model=UserRead)
-async def register_user(payload: UserCreate, db: AsyncSession = Depends(get_session)):
-    q = await db.execute(select(User).where((User.email == payload.email) | (User.phone == payload.phone)))
-    exists = q.scalar_one_or_none()
+def _auth_rate_limit_check(ip: str | None) -> bool:
+    if not ip:
+        return True
+    now = time.time()
+    dq = _ip_events.setdefault(ip, deque())
+    while dq and (now - dq[0]) > _AUTH_WINDOW_SECONDS:
+        dq.popleft()
+    if len(dq) >= _AUTH_MAX_REQUESTS:
+        return False
+    dq.append(now)
+    return True
+
+
+@router.post("/register")
+async def register_user(payload: UserCreate, db: AsyncSession = Depends(get_session), request: Request = None):
+    ip = request.client.host if request and request.client else None
+    if not _auth_rate_limit_check(ip):
+        raise HTTPException(status_code=429, detail="Too many registration attempts. Please try again later.")
+    from sqlalchemy import text
+    exists = (await db.execute(
+        text("SELECT user_id FROM Users WHERE email = :email OR phone = :phone"),
+        {"email": payload.email, "phone": payload.phone},
+    )).first()
     if exists:
-        raise HTTPException(status_code=400, detail="User with email/phone already exists")
-    user = User(
-        name=payload.name,
-        email=payload.email,
-        phone=payload.phone,
-        password=get_password_hash(payload.password),
-    )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-    # Create verification record
-    ver = UserVerification(user_id=user.user_id)
-    # Auto-complete verification when policy does not require it
-    if not settings.require_user_verification:
-        from datetime import datetime
-        ver.status = "verified"
-        ver.registration_completed_at = datetime.utcnow()
-    db.add(ver)
-    await db.commit()
-    # Send confirmation notifications (stubbed)
+        raise HTTPException(status_code=409, detail="User with email or phone already exists")
     try:
-        if user.email:
-            send_email(user.email, "Confirm your account", "Welcome to NearBuy! Please verify your email.")
-        if user.phone:
-            send_sms(user.phone, "NearBuy: Please verify your phone number.")
+        await db.execute(
+            text(
+                "INSERT INTO Users (user_id, name, email, password, phone, created_at) "
+                "VALUES (randomblob(16), :name, :email, :password, :phone, CURRENT_TIMESTAMP)"
+            ),
+            {
+                "name": payload.name,
+                "email": payload.email,
+                "password": get_password_hash(payload.password),
+                "phone": payload.phone,
+            },
+        )
+        # Fetch the new user for response
+        row = (await db.execute(
+            text("SELECT user_id, name, email, phone, created_at FROM Users WHERE email = :email"),
+            {"email": payload.email},
+        )).first()
+        if not row:
+            await db.rollback()
+            raise HTTPException(status_code=500, detail="Failed to create user")
+        # Notifications (best-effort)
+        try:
+            if row[2]:
+                send_email(row[2], "Confirm your account", "Welcome to NearBuy! Please verify your email.")
+            if row[3]:
+                send_sms(row[3], "NearBuy: Please verify your phone number.")
+        except Exception as e:
+            logging.warning(f"Notification error: {e}")
+        # Log registration
+        uid = row[0]
+        db.add(Log(action_type="register", description=f"user:{uid.hex() if isinstance(uid, (bytes, bytearray)) else uid}", status_code=200))
+        await db.commit()
+        # Serialize response
+        uid_out = row[0]
+        if isinstance(uid_out, (bytes, bytearray)):
+            uid_out = uid_out.hex()
+        return {
+            "user_id": uid_out,
+            "name": row[1],
+            "email": row[2],
+            "phone": row[3],
+            "created_at": row[4],
+        }
+    except HTTPException:
+        raise
     except Exception as e:
-        logging.warning(f"Notification error: {e}")
-    # Log registration
-    db.add(AuthLog(principal_type="user", principal_id=str(user.user_id), event_type="register", success=True, reason=None))
-    await db.commit()
-    return user
+        await db.rollback()
+        logging.error(f"User registration error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create user")
 
 
 def _set_auth_cookies(response: Response, access_token: str, refresh_token: str, *, role: str):
@@ -86,92 +127,90 @@ def _set_auth_cookies(response: Response, access_token: str, refresh_token: str,
 
 
 @router.post("/login", response_model=Token)
-async def login(payload: UserLogin, db: AsyncSession = Depends(get_session)):
-    q = await db.execute(select(User).where(User.email == payload.email))
-    user = q.scalar_one_or_none()
-    if not user or not user.password or not verify_password(payload.password, user.password):
-        # Log failed login
-        db.add(AuthLog(principal_type="user", principal_id=str(user.user_id) if user else None, event_type="login", success=False, reason="invalid_credentials"))
+async def login(payload: UserLogin, db: AsyncSession = Depends(get_session), request: Request = None):
+    ip = request.client.host if request and request.client else None
+    if not _auth_rate_limit_check(ip):
+        raise HTTPException(status_code=429, detail="Too many login attempts. Please try again later.")
+    from sqlalchemy import text
+    row = (await db.execute(text("SELECT user_id, password FROM Users WHERE email = :email"), {"email": payload.email})).first()
+    if not row or not row[1] or not verify_password(payload.password, row[1]):
+        db.add(Log(action_type="login", description=f"user_invalid:{payload.email}", status_code=401))
         await db.commit()
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    # Check verification status when policy requires it
-    if settings.require_user_verification:
-        ver = (await db.execute(select(UserVerification).where(UserVerification.user_id == user.user_id))).scalar_one_or_none()
-        if not ver or ver.status != "verified":
-            db.add(AuthLog(principal_type="user", principal_id=str(user.user_id), event_type="login", success=False, reason="registration_incomplete"))
-            await db.commit()
-            raise HTTPException(status_code=403, detail="Registration incomplete. Please verify your account before login.")
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    sub = row[0]
+    if isinstance(sub, (bytes, bytearray)):
+        sub = sub.hex()
     token = create_access_token(
-        str(user.user_id),
+        str(sub),
         expires_delta=timedelta(minutes=settings.access_token_expire_minutes),
         role="user",
     )
-    refresh = create_access_token(str(user.user_id), expires_delta=timedelta(minutes=settings.refresh_token_expire_minutes), role="user")
-    # Update last_login_at
-    user.last_login_at = datetime.utcnow()
+    refresh = create_access_token(str(sub), expires_delta=timedelta(minutes=settings.refresh_token_expire_minutes), role="user")
     await db.commit()
-    # Set cookies and also return body for backward compatibility
     response = Response()
     _set_auth_cookies(response, token, refresh, role="user")
     response.media_type = "application/json"
-    response.body = (Token(access_token=token, user_id=user.user_id).model_dump_json()).encode("utf-8")
+    response.body = (Token(access_token=token).model_dump_json()).encode("utf-8")
     return response
 
 
 @router.post("/admin/login", response_model=Token)
 async def admin_login(payload: AdminLogin, db: AsyncSession = Depends(get_session)):
-    q = await db.execute(select(Admin).where(Admin.userId == payload.userId))
-    admin = q.scalar_one_or_none()
-    if not admin:
+    from jose import jwt
+    from sqlalchemy import text
+    # Determine encoded username
+    uname = (payload.userId or "").strip().lower()
+    if not uname or not payload.password:
+        raise HTTPException(status_code=422, detail="Username and password are required")
+    enc_user = jwt.encode({"u": uname}, settings.secret_key, algorithm=settings.algorithm)
+    row = (await db.execute(text("SELECT username, password_hash, salt, last_login, failed_attempts FROM admin_credentials WHERE username = :u"), {"u": enc_user})).first()
+    if not row:
         raise HTTPException(status_code=401, detail="Invalid admin credentials")
-    # Admin passwords are pre-hashed when inserted; in real setup use passlib
-    # For demo: store hashed and verify via passlib
+    _, phash, salt, last_login, failed_attempts = row
+    # Lockout check
+    from datetime import datetime, timedelta
+    now = datetime.utcnow()
+    if failed_attempts and failed_attempts >= 5 and last_login and (now - last_login) < timedelta(minutes=30):
+        raise HTTPException(status_code=429, detail="Account locked due to failed attempts. Try again later.")
     from app.core.security import verify_password
-    if not verify_password(payload.password, admin.password):
+    ok = verify_password(payload.password, phash)
+    if not ok:
+        await db.execute(text("UPDATE admin_credentials SET failed_attempts = failed_attempts + 1, last_login = :ts WHERE username = :u"), {"ts": now, "u": enc_user})
+        await db.commit()
         raise HTTPException(status_code=401, detail="Invalid admin credentials")
-    token = create_access_token(f"admin:{admin.userId}", role="admin")
+    # Reset attempts on success
+    await db.execute(text("UPDATE admin_credentials SET failed_attempts = 0, last_login = :ts WHERE username = :u"), {"ts": now, "u": enc_user})
+    await db.commit()
+    token = create_access_token(f"admin:{uname}", role="admin", expires_delta=timedelta(minutes=30))
     return Token(access_token=token)
 
 
 @router.post("/owner/login", response_model=Token)
 async def owner_login(payload: OwnerLogin, db: AsyncSession = Depends(get_session)):
-    # Email/password authentication for owners
     if not payload.email or not payload.password:
         raise HTTPException(status_code=400, detail="Email and password are required")
 
-    q = await db.execute(select(ShopOwner).where(ShopOwner.email == payload.email))
-    owner = q.scalar_one_or_none()
-    if not owner or not owner.password_hash:
-        db.add(AuthLog(principal_type="owner", principal_id=str(owner.owner_id) if owner else None, event_type="login", success=False, reason="invalid_credentials"))
+    from sqlalchemy import text
+    row = (await db.execute(text("SELECT owner_id, password_hash FROM Shop_Owners WHERE LOWER(email) = LOWER(:email)"), {"email": payload.email.strip()})).first()
+    if not row or not row[1] or not verify_password(payload.password, row[1]):
+        db.add(Log(action_type="login", description=f"owner_invalid:{payload.email}", status_code=401))
         await db.commit()
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    if not verify_password(payload.password, owner.password_hash):
-        db.add(AuthLog(principal_type="owner", principal_id=str(owner.owner_id), event_type="login", success=False, reason="invalid_credentials"))
-        await db.commit()
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    # Owner verification
-    sec = (await db.execute(select(OwnerSecurity).where(OwnerSecurity.owner_id == owner.owner_id))).scalar_one_or_none()
-    if not sec or not sec.email_verified_at or not sec.phone_verified_at:
-        db.add(AuthLog(principal_type="owner", principal_id=str(owner.owner_id), event_type="login", success=False, reason="verification_required"))
-        await db.commit()
-        raise HTTPException(status_code=403, detail="Owner account not verified. Please complete email/phone verification.")
-    # Two-factor authentication removed per requirements
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    sub = row[0]
+    if isinstance(sub, (bytes, bytearray)):
+        sub = sub.hex()
     token = create_access_token(
-        str(owner.owner_id),
+        str(sub),
         expires_delta=timedelta(minutes=settings.access_token_expire_minutes),
         role="owner",
     )
-    refresh = create_access_token(str(owner.owner_id), expires_delta=timedelta(minutes=settings.refresh_token_expire_minutes), role="owner")
-    # Update last_login_at
-    owner.last_login_at = datetime.utcnow()
+    refresh = create_access_token(str(sub), expires_delta=timedelta(minutes=settings.refresh_token_expire_minutes), role="owner")
+    db.add(Log(action_type="login", description=f"owner:{sub}", status_code=200))
     await db.commit()
     response = Response()
     _set_auth_cookies(response, token, refresh, role="owner")
     response.media_type = "application/json"
-    response.body = (Token(access_token=token, user_id=owner.owner_id).model_dump_json()).encode("utf-8")
-    # Log success
-    db.add(AuthLog(principal_type="owner", principal_id=str(owner.owner_id), event_type="login", success=True, reason=None))
-    await db.commit()
+    response.body = (Token(access_token=token).model_dump_json()).encode("utf-8")
     return response
 
 

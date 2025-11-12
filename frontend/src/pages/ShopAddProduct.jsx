@@ -11,33 +11,29 @@ export default function ShopAddProduct() {
   const [stock, setStock] = useState('')
   const [file, setFile] = useState(null)
   const [status, setStatus] = useState('')
+  const [progress, setProgress] = useState(0)
+  const MAX_IMAGE_SIZE = 3 * 1024 * 1024
+  const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp']
 
   const submit = async (e) => {
     e.preventDefault()
-    // Client-side policy: block image uploads
-    if (file) {
-      setStatus('Image uploads are currently disabled')
-      return
-    }
     setStatus('Submitting...')
+    setProgress(0)
     try {
-      const ownerToken = localStorage.getItem('owner_token')
-      if (!ownerToken) {
-        setStatus('Please login as shop owner first')
-        return
-      }
-      const data = new FormData()
-      data.append('product_name', form.product_name)
-      if (form.category_id) data.append('category_id', form.category_id)
-      if (form.brand) data.append('brand', form.brand)
-      if (form.description) data.append('description', form.description)
-      if (form.color) data.append('color', form.color)
-      if (price) data.append('price', price)
-      if (stock) data.append('stock', stock)
-      const res = await axios.post(`${API_BASE}/shops/${shopId}/products/create`, data, {
-        headers: { Authorization: `Bearer ${ownerToken}` },
-      })
+      const res = await axios.post(`${API_BASE}/shops/manage/${shopId}/products/create`, {
+        product_name: form.product_name,
+        category_id: form.category_id || null,
+        brand: form.brand || null,
+        description: form.description || null,
+        color: form.color || null,
+        price: price ? Number(price) : null,
+        stock: stock ? Number(stock) : null,
+      }, { withCredentials: true })
       setStatus(`Added product ${res.data.product_name} (ID ${res.data.product_id})`)
+      setForm({ product_name: '', brand: '', description: '', color: '', category_id: '' })
+      setPrice('')
+      setStock('')
+      setFile(null)
     } catch (e) {
       setStatus(e?.response?.data?.detail || 'Failed to add product')
     }
@@ -64,8 +60,8 @@ export default function ShopAddProduct() {
           <input className="w-full rounded-lg border p-2 bg-[#EAF0FF] text-black" value={form.color} onChange={e=>setForm({...form, color: e.target.value})} />
         </div>
         <div>
-          <label className="block text-sm font-semibold mb-1">Category ID</label>
-          <input className="w-full rounded-lg border p-2 bg-[#EAF0FF] text-black" value={form.category_id} onChange={e=>setForm({...form, category_id: e.target.value})} />
+          <label className="block text-sm font-semibold mb-1">Category ID (string)</label>
+          <input className="w-full rounded-lg border p-2 bg-[#EAF0FF] text-black" placeholder="e.g., mobiles, laptops" value={form.category_id} onChange={e=>setForm({...form, category_id: e.target.value})} />
         </div>
         <div>
           <label className="block text-sm font-semibold mb-1">Price</label>
@@ -76,15 +72,21 @@ export default function ShopAddProduct() {
           <input type="number" className="w-full rounded-lg border p-2 bg-[#EAF0FF] text-black" value={stock} onChange={e=>setStock(e.target.value)} />
         </div>
         <div className="md:col-span-2">
-          <label className="block text-sm font-semibold mb-1">Image</label>
-          <input type="file" accept="image/*" disabled onChange={e=>setFile(e.target.files?.[0] || null)} />
-          <div className="text-xs text-gray-600 mt-1">Image uploads are currently disabled.</div>
+          <label className="block text-sm font-semibold mb-1">Image (JPEG/PNG/WebP, ≤ 3MB)</label>
+          <input type="file" accept="image/jpeg,image/png,image/webp" onChange={e=>setFile(e.target.files?.[0] || null)} />
+          {progress > 0 && (
+            <div className="mt-2 h-2 bg-gray-200 rounded">
+              <div className="h-2 bg-primary rounded" style={{ width: `${progress}%` }} />
+            </div>
+          )}
         </div>
         <div className="md:col-span-2">
           <button type="submit" className="px-4 py-2 rounded-lg bg-white text-black border font-semibold">Add Product</button>
         </div>
       </form>
-      {status && <div className="text-sm text-black">{status}</div>}
+      {status && (
+        <div className={`text-sm ${status.startsWith('Added product') ? 'p-2 rounded border bg-green-50 text-green-700' : 'p-2 rounded border bg-red-50 text-red-700'}`}>{status}</div>
+      )}
     </div>
   )
 }

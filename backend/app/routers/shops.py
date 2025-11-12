@@ -1,19 +1,19 @@
 from math import radians, sin, cos, sqrt, atan2
-import uuid
 import os
 import time
 from collections import deque
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request, Response, Path
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.orm import selectinload
 from app.db.session import get_session
 from app.core.auth import get_current_owner, ensure_owner_of_shop
-from app.models import Shop, ShopAddress, ShopProduct, Product, ShopOwner, ProductImage, AuthLog, OwnerSecurity
+from app.core.config import settings
+from app.models import Shop, ShopAddress, ShopProduct, Product, ShopOwner, ProductImage
 from app.core.imagekit import ImageKitClient
-from app.schemas.shop import ShopCreate, ShopRead, ShopRegister, ShopProductAdd
+from app.models.shop import ShopCreate, ShopRead, ShopRegister, ShopProductAdd, ShopInventoryUpdate
 from app.routers.realtime import notify_shop_update
 from sqlalchemy import update
-from app.core.security import get_password_hash
 from datetime import datetime
 
 
@@ -30,7 +30,7 @@ _SHOP_IMAGES_ROOT = os.path.join(os.path.dirname(os.path.dirname(__file__)), "me
 os.makedirs(_SHOP_IMAGES_ROOT, exist_ok=True)
 
 
-def _rate_limit_check(owner_id: uuid.UUID) -> bool:
+def _rate_limit_check(owner_id: int) -> bool:
     now = time.time()
     key = str(owner_id)
     dq = _owner_upload_events.setdefault(key, deque())
@@ -65,12 +65,8 @@ def _content_type_to_ext(content_type: str) -> str | None:
 
 @router.post("/", response_model=ShopRead)
 async def create_shop(payload: ShopCreate, db: AsyncSession = Depends(get_session)):
-    # Ensure GSTIN is unique if provided
-    if payload.gstin:
-        existing = await db.execute(select(Shop).where(Shop.gstin == payload.gstin))
-        if existing.scalar_one_or_none():
-            raise HTTPException(status_code=400, detail="Shop with this GSTIN already exists")
-    shop = Shop(shop_name=payload.shop_name, owner_id=payload.owner_id, shop_image=payload.shop_image, gstin=payload.gstin)
+    # db.txt: no GSTIN field; create with allowed columns only
+    shop = Shop(shop_name=payload.shop_name, owner_id=payload.owner_id, shop_image=payload.shop_image)
     db.add(shop)
     await db.commit()
     await db.refresh(shop)
@@ -79,14 +75,20 @@ async def create_shop(payload: ShopCreate, db: AsyncSession = Depends(get_sessio
 
 @router.post("/register", response_model=ShopRead)
 async def register_shop(payload: ShopRegister, db: AsyncSession = Depends(get_session)):
-    # Validate GSTIN uniqueness
-    if payload.gstin:
-        existing = await db.execute(select(Shop).where(Shop.gstin == payload.gstin))
-        if existing.scalar_one_or_none():
-            raise HTTPException(status_code=400, detail="Shop with this GSTIN already exists")
+    # Password validation: required with strength and confirmation
+    if not payload.owner_password or not payload.owner_password_confirm:
+        raise HTTPException(status_code=422, detail="Password and confirmation are required")
+    pw = payload.owner_password
+    confirm = payload.owner_password_confirm
+    import re
+    if len(pw) < 8 or not re.search(r"[A-Z]", pw) or not re.search(r"\d", pw) or not re.search(r"[^A-Za-z0-9]", pw):
+        raise HTTPException(status_code=422, detail="Password must be 8+ chars with uppercase, number, and special character")
+    if pw != confirm:
+        raise HTTPException(status_code=422, detail="Passwords do not match")
 
     # Create or find owner by email/phone
     owner_id = None
+    owner = None
     if payload.owner_email or payload.owner_phone:
         q = await db.execute(
             select(ShopOwner).where(
@@ -96,63 +98,106 @@ async def register_shop(payload: ShopRegister, db: AsyncSession = Depends(get_se
         )
         owner = q.scalar_one_or_none()
         if not owner:
-            owner = ShopOwner(owner_name=payload.owner_name, phone=payload.owner_phone, email=payload.owner_email)
-            db.add(owner)
-            await db.flush()  # get owner_id
-            # If password provided, set it for newly created owner
-            if payload.owner_password:
-                owner.password_hash = get_password_hash(payload.owner_password)
-            # Create OwnerSecurity and auto-verify for immediate login
-            db.add(OwnerSecurity(
-                owner_id=owner.owner_id,
-                email_verified_at=datetime.utcnow(),
-                phone_verified_at=datetime.utcnow(),
-            ))
+            from app.core.security import get_password_hash
+            await db.execute(
+                text(
+                    "INSERT INTO Shop_Owners (owner_id, owner_name, phone, email, password_hash, created_at) "
+                    "VALUES (randomblob(16), :owner_name, :phone, :email, :password_hash, CURRENT_TIMESTAMP)"
+                ),
+                {
+                    "owner_name": payload.owner_name,
+                    "phone": payload.owner_phone,
+                    "email": payload.owner_email,
+                    "password_hash": get_password_hash(pw),
+                },
+            )
+            q2 = await db.execute(select(ShopOwner).where(ShopOwner.email == payload.owner_email))
+            owner = q2.scalar_one()
         else:
-            # If existing owner without password and one is provided, set it
-            if payload.owner_password and not owner.password_hash:
-                owner.password_hash = get_password_hash(payload.owner_password)
-            # Ensure OwnerSecurity exists and mark verified for immediate login
-            sec = (await db.execute(select(OwnerSecurity).where(OwnerSecurity.owner_id == owner.owner_id))).scalar_one_or_none()
-            if not sec:
-                db.add(OwnerSecurity(
-                    owner_id=owner.owner_id,
-                    email_verified_at=datetime.utcnow(),
-                    phone_verified_at=datetime.utcnow(),
-                ))
-            else:
-                sec.email_verified_at = datetime.utcnow()
-                sec.phone_verified_at = datetime.utcnow()
-        owner_id = owner.owner_id
+            from app.core.security import get_password_hash
+            await db.execute(
+                text("UPDATE Shop_Owners SET password_hash = :ph WHERE email = :email"),
+                {"ph": get_password_hash(pw), "email": payload.owner_email},
+            )
+            # Fetch owner_id via raw SQL
+            q3 = await db.execute(text("SELECT owner_id FROM Shop_Owners WHERE email = :email"), {"email": payload.owner_email})
+            owner_row = q3.first()
+            owner_id = owner_row[0] if owner_row else None
+        if owner_id is None:
+            # fallback: fetch by phone if email missing
+            q4 = await db.execute(text("SELECT owner_id FROM Shop_Owners WHERE phone = :phone"), {"phone": payload.owner_phone})
+            owner_row2 = q4.first()
+            owner_id = owner_row2[0] if owner_row2 else owner_id
 
-    # Create shop
-    shop = Shop(shop_name=payload.shop_name, owner_id=owner_id, shop_image=payload.shop_image, gstin=payload.gstin)
-    db.add(shop)
-    await db.flush()  # obtain shop_id
+    # Ensure GSTIN uniqueness
+    if payload.gstin:
+        dup = (await db.execute(text("SELECT shop_id FROM Shops WHERE gstin = :gstin"), {"gstin": payload.gstin})).first()
+        if dup:
+            raise HTTPException(status_code=409, detail="GSTIN already registered")
+
+    # Create shop via raw SQL to align with SQLite BLOB keys
+    await db.execute(
+        text(
+            "INSERT INTO Shops (shop_id, shop_name, gstin, owner_id, shop_image, created_at, city, contact_number) "
+            "VALUES (randomblob(16), :shop_name, :gstin, :owner_id, :shop_image, CURRENT_TIMESTAMP, :city, :contact_number)"
+        ),
+        {
+            "shop_name": payload.shop_name,
+            "gstin": getattr(payload, "gstin", None),
+            "owner_id": owner_id,
+            "shop_image": payload.shop_image,
+            "city": payload.city,
+            "contact_number": payload.owner_phone,
+        },
+    )
+    q_shop = await db.execute(
+        text(
+            "SELECT shop_id, shop_name, shop_image FROM Shops WHERE owner_id = :owner_id AND shop_name = :shop_name ORDER BY created_at DESC LIMIT 1"
+        ),
+        {"owner_id": owner_id, "shop_name": payload.shop_name},
+    )
+    row = q_shop.first()
 
     # Optional address
-    if any([payload.city, payload.country, payload.pincode, payload.landmark, payload.area, payload.latitude, payload.longitude]):
-        addr = ShopAddress(
-            shop_id=shop.shop_id,
-            city=payload.city,
-            country=payload.country,
-            pincode=payload.pincode,
-            landmark=payload.landmark,
-            area=payload.area,
-            latitude=payload.latitude,
-            longitude=payload.longitude,
+    if row and any([payload.city, payload.country, payload.pincode, payload.landmark, payload.area, payload.latitude, payload.longitude]):
+        await db.execute(
+            text(
+                "INSERT INTO Shop_Address (address_id, shop_id, city, country, pincode, landmark, area, latitude, longitude, created_at) "
+                "VALUES (randomblob(16), :shop_id, :city, :country, :pincode, :landmark, :area, :latitude, :longitude, CURRENT_TIMESTAMP)"
+            ),
+            {
+                "shop_id": row[0],
+                "city": payload.city,
+                "country": payload.country,
+                "pincode": payload.pincode,
+                "landmark": payload.landmark,
+                "area": payload.area,
+                "latitude": payload.latitude,
+                "longitude": payload.longitude,
+            },
         )
-        db.add(addr)
 
     await db.commit()
-    await db.refresh(shop)
-    return shop
+    sid = row[0]
+    if isinstance(sid, (bytes, bytearray)):
+        sid = sid.hex()
+    return {"shop_id": sid, "shop_name": row[1], "shop_image": row[2]}
 
 
-@router.get("/", response_model=list[ShopRead])
+@router.get("/")
 async def list_shops(db: AsyncSession = Depends(get_session)):
     res = await db.execute(select(Shop))
-    return res.scalars().all()
+    items = []
+    for s in res.scalars().all():
+        sid = s.shop_id
+        if isinstance(sid, (bytes, bytearray)):
+            sid = sid.hex()
+        items.append({
+            "shop_id": sid,
+            "shop_name": s.shop_name,
+            "shop_image": s.shop_image,
+        })
+    return items
 
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -166,16 +211,25 @@ def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 @router.get("/nearby")
 async def nearby_shops(lat: float, lon: float, radius_km: float = 5.0, db: AsyncSession = Depends(get_session)):
-    res = await db.execute(select(Shop, ShopAddress).join(ShopAddress, ShopAddress.shop_id == Shop.shop_id))
+    res = await db.execute(select(Shop, ShopAddress).join(ShopAddress, ShopAddress.shop_id == Shop.shop_id, isouter=True))
     rows = res.all()
     out = []
     for shop, addr in rows:
-        if addr.latitude is None or addr.longitude is None:
+        if not addr or addr.latitude is None or addr.longitude is None:
             continue
-        distance = haversine(float(addr.latitude), float(addr.longitude), lat, lon)
+        try:
+            lat1 = float(addr.latitude)
+            lon1 = float(addr.longitude)
+        except Exception:
+            # skip invalid coordinates
+            continue
+        distance = haversine(lat1, lon1, float(lat), float(lon))
         if distance <= radius_km:
+            sid = shop.shop_id
+            if isinstance(sid, (bytes, bytearray)):
+                sid = sid.hex()
             out.append({
-                "shop_id": shop.shop_id,
+                "shop_id": sid,
                 "shop_name": shop.shop_name,
                 "distance_km": round(distance, 2),
                 "city": addr.city,
@@ -187,130 +241,212 @@ async def nearby_shops(lat: float, lon: float, radius_km: float = 5.0, db: Async
 
 @router.get("/by_city")
 async def shops_by_city(city: str, db: AsyncSession = Depends(get_session)):
-    res = await db.execute(
-        select(Shop, ShopAddress).join(ShopAddress, ShopAddress.shop_id == Shop.shop_id)
-    )
-    rows = res.all()
-    city_lower = city.lower()
+    from sqlalchemy import text
+    norm = city.strip()
+    try:
+        rows = (await db.execute(
+            text("SELECT shop_id, shop_name, city, shop_image FROM Shops WHERE LOWER(city) = LOWER(:city)"),
+            {"city": norm},
+        )).all()
+    except Exception:
+        import logging
+        logging.exception("shops_by_city query failed for city=%r", norm)
+        rows = []
     out = []
-    for shop, addr in rows:
-        if (addr.city or "").lower().strip() == city_lower.strip():
-            out.append({
-                "shop_id": shop.shop_id,
-                "shop_name": shop.shop_name,
-                "city": addr.city,
-                "area": addr.area,
-                "shop_image": shop.shop_image,
-            })
+    for sid, name, c, img in rows:
+        sid_out = sid.hex() if isinstance(sid, (bytes, bytearray)) else sid
+        out.append({
+            "shop_id": sid_out,
+            "shop_name": name,
+            "city": c,
+            "shop_image": img,
+        })
     return out
 
 
 @router.get("/{shop_id}/availability")
-async def shop_availability(shop_id: uuid.UUID, db: AsyncSession = Depends(get_session)):
-    res = await db.execute(select(Shop).where(Shop.shop_id == shop_id))
+async def shop_availability(shop_id: int, db: AsyncSession = Depends(get_session)):
+    stmt = select(Shop).where(Shop.shop_id == shop_id).options(selectinload(Shop.timings))
+    res = await db.execute(stmt)
     shop = res.scalar_one_or_none()
     if not shop:
         raise HTTPException(status_code=404, detail="Shop not found")
-    # Eagerly load timings
-    await db.refresh(shop)
+    # Timings are eagerly loaded above; compute open status safely
     return {"shop_id": shop.shop_id, "shop_name": shop.shop_name, "is_open": shop.is_open()}
 
 
+@router.get("/owner/products")
+async def owner_products_hex(db: AsyncSession = Depends(get_session), owner=Depends(get_current_owner), request: Request = None, response: Response = None):
+    oid_hex = owner.get("owner_id")
+    oid_bytes = bytes.fromhex(oid_hex) if isinstance(oid_hex, str) else oid_hex
+    rows = (await db.execute(text(
+        "SELECT sp.shop_product_id, s.shop_id, s.shop_name, p.product_id, p.product_name, p.brand, sp.price, sp.stock "
+        "FROM Shop_Product sp JOIN Shops s ON sp.shop_id = s.shop_id JOIN Products p ON sp.product_id = p.product_id "
+        "WHERE s.owner_id = :oid"
+    ), {"oid": oid_bytes})).all()
+    out = []
+    for spid, sid, sname, pid, name, brand, price, stock in rows:
+        out.append({
+            "shop_product_id": (spid.hex() if isinstance(spid, (bytes, bytearray)) else spid),
+            "shop_id": (sid.hex() if isinstance(sid, (bytes, bytearray)) else sid),
+            "shop_name": sname,
+            "product_id": (pid.hex() if isinstance(pid, (bytes, bytearray)) else pid),
+            "product_name": name,
+            "brand": brand,
+            "price": float(price) if price is not None else None,
+            "stock": stock,
+        })
+    try:
+        origin = request.headers.get("origin") if request else None
+        if origin and (origin in (settings.cors_origins or [])):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers.setdefault("Vary", "Origin")
+    except Exception:
+        pass
+    return out
+
 @router.get("/{shop_id}/products")
-async def shop_products(shop_id: uuid.UUID, db: AsyncSession = Depends(get_session)):
-    res = await db.execute(
-        select(ShopProduct, Product).join(Product, Product.product_id == ShopProduct.product_id).where(ShopProduct.shop_id == shop_id)
-    )
-    rows = res.all()
-    product_ids = [p.product_id for _, p in rows]
-    img_map = {}
-    if product_ids:
-        from app.models import ProductImage
-        imgs = await db.execute(select(ProductImage).where(ProductImage.product_id.in_(product_ids)))
-        for img in imgs.scalars().all():
-            img_map.setdefault(img.product_id, img.image_url)
-    return [
-        {
-            "product_id": p.product_id,
-            "product_name": p.product_name,
-            "price": float(sp.price) if sp.price is not None else None,
-            "stock": sp.stock,
-            "image_url": img_map.get(p.product_id),
-        }
-        for sp, p in rows
-    ]
+async def shop_products(shop_id: str = Path(..., pattern=r"^[0-9a-fA-F]{32}$"), db: AsyncSession = Depends(get_session)):
+    sid_bytes = bytes.fromhex(shop_id)
+    rows = (await db.execute(text(
+        "SELECT sp.product_id, p.product_name, sp.price, sp.stock "
+        "FROM Shop_Product sp JOIN Products p ON sp.product_id = p.product_id "
+        "WHERE sp.shop_id = :sid"
+    ), {"sid": sid_bytes})).all()
+    out = []
+    for pid, name, price, stock in rows:
+        out.append({
+            "product_id": (pid.hex() if isinstance(pid, (bytes, bytearray)) else pid),
+            "product_name": name,
+            "price": float(price) if price is not None else None,
+            "stock": stock,
+            "image_url": None,
+        })
+    return out
 
 
 @router.post("/{shop_id}/products")
 async def add_product_to_shop(
-    shop_id: uuid.UUID,
+    shop_id: str,
     payload: ShopProductAdd,
     db: AsyncSession = Depends(get_session),
     owner=Depends(get_current_owner),
 ):
-    await ensure_owner_of_shop(shop_id, owner, db)
-    # Validate shop exists
-    shop_res = await db.execute(select(Shop).where(Shop.shop_id == shop_id))
-    if not shop_res.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Shop not found")
-    # Validate product exists
+    try:
+        sid_bytes = bytes.fromhex(shop_id)
+    except ValueError:
+        sid_bytes = None
+    if sid_bytes is not None:
+        oid_bytes = bytes.fromhex(owner.get("owner_id"))
+        chk = (await db.execute(text("SELECT owner_id FROM Shops WHERE shop_id = :sid"), {"sid": sid_bytes})).first()
+        if not chk or chk[0] != oid_bytes:
+            raise HTTPException(status_code=403, detail="Not authorized for this shop")
+        pid = payload.product_id
+        pid_bytes = pid if isinstance(pid, (bytes, bytearray)) else (bytes.fromhex(str(pid)) if isinstance(pid, str) else None)
+        if pid_bytes is None:
+            raise HTTPException(status_code=422, detail="Invalid product ID")
+        await db.execute(text(
+            "INSERT INTO Shop_Product (shop_product_id, shop_id, product_id, price, stock, created_at) "
+            "VALUES (randomblob(16), :sid, :pid, :price, :stock, CURRENT_TIMESTAMP) ON CONFLICT(shop_id, product_id) DO UPDATE SET price=:price, stock=:stock"
+        ), {"sid": sid_bytes, "pid": pid_bytes, "price": payload.price, "stock": payload.stock})
+        await db.commit()
+        return {"shop_id": shop_id, "product_id": (pid.hex() if isinstance(pid, (bytes, bytearray)) else pid), "price": payload.price, "stock": payload.stock}
+    # Fallback integer handling
+    shop_id_int = int(shop_id)
+    await ensure_owner_of_shop(shop_id_int, owner, db)
     prod_res = await db.execute(select(Product).where(Product.product_id == payload.product_id))
     if not prod_res.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Product not found")
-    # Upsert shop-product entry
     existing = await db.execute(
-        select(ShopProduct).where((ShopProduct.shop_id == shop_id) & (ShopProduct.product_id == payload.product_id))
+        select(ShopProduct).where((ShopProduct.shop_id == shop_id_int) & (ShopProduct.product_id == payload.product_id))
     )
     sp = existing.scalar_one_or_none()
     if sp:
         sp.price = payload.price
         sp.stock = payload.stock
     else:
-        sp = ShopProduct(shop_id=shop_id, product_id=payload.product_id, price=payload.price, stock=payload.stock)
+        sp = ShopProduct(shop_id=shop_id_int, product_id=payload.product_id, price=payload.price, stock=payload.stock)
         db.add(sp)
     await db.commit()
-    return {"shop_id": shop_id, "product_id": payload.product_id, "price": payload.price, "stock": payload.stock}
+    return {"shop_id": shop_id_int, "product_id": payload.product_id, "price": payload.price, "stock": payload.stock}
 
-
-@router.delete("/{shop_id}/products/{product_id}")
-async def delete_product_from_shop(
-    shop_id: uuid.UUID,
-    product_id: uuid.UUID,
+@router.patch("/{shop_id}/products/{product_id}/inventory")
+async def update_shop_product_inventory(
+    shop_id: int,
+    product_id: int,
+    payload: ShopInventoryUpdate,
     db: AsyncSession = Depends(get_session),
     owner=Depends(get_current_owner),
 ):
-    # Ensure the requester owns the shop
     await ensure_owner_of_shop(shop_id, owner, db)
-
-    # Check if mapping exists
     existing = await db.execute(
         select(ShopProduct).where((ShopProduct.shop_id == shop_id) & (ShopProduct.product_id == product_id))
     )
     sp = existing.scalar_one_or_none()
     if not sp:
         raise HTTPException(status_code=404, detail="Product not linked to this shop")
+    if payload.price is not None:
+        sp.price = payload.price
+    if payload.stock is not None:
+        sp.stock = payload.stock
+    await db.commit()
+    return {
+        "shop_id": shop_id,
+        "product_id": product_id,
+        "price": float(sp.price) if sp.price is not None else None,
+        "stock": sp.stock,
+    }
 
-    # Delete the mapping
+
+@router.delete("/{shop_id}/products/{product_id}")
+async def delete_product_from_shop(
+    shop_id: str,
+    product_id: str,
+    db: AsyncSession = Depends(get_session),
+    owner=Depends(get_current_owner),
+):
+    try:
+        sid_bytes = bytes.fromhex(shop_id)
+        pid_bytes = bytes.fromhex(product_id)
+    except ValueError:
+        sid_bytes = None
+    if sid_bytes is not None:
+        oid_bytes = bytes.fromhex(owner.get("owner_id"))
+        chk = (await db.execute(text("SELECT owner_id FROM Shops WHERE shop_id = :sid"), {"sid": sid_bytes})).first()
+        if not chk or chk[0] != oid_bytes:
+            raise HTTPException(status_code=403, detail="Not authorized for this shop")
+        await db.execute(text("DELETE FROM Shop_Product WHERE shop_id=:sid AND product_id=:pid"), {"sid": sid_bytes, "pid": pid_bytes})
+        await db.commit()
+        try:
+            await notify_shop_update(shop_id, {"event": "product_removed", "shop_id": shop_id, "product_id": product_id})
+        except Exception:
+            pass
+        return {"ok": True}
+    # Fallback integer handling
+    shop_id_int = int(shop_id)
+    product_id_int = int(product_id)
+    await ensure_owner_of_shop(shop_id_int, owner, db)
+    existing = await db.execute(
+        select(ShopProduct).where((ShopProduct.shop_id == shop_id_int) & (ShopProduct.product_id == product_id_int))
+    )
+    sp = existing.scalar_one_or_none()
+    if not sp:
+        raise HTTPException(status_code=404, detail="Product not linked to this shop")
     await db.delete(sp)
     await db.commit()
-    # Notify realtime subscribers (if any) that shop inventory changed
     try:
-        await notify_shop_update(shop_id, {
-            "event": "product_removed",
-            "shop_id": str(shop_id),
-            "product_id": str(product_id),
-        })
+        await notify_shop_update(shop_id_int, {"event": "product_removed", "shop_id": shop_id_int, "product_id": product_id_int})
     except Exception:
-        # Non-blocking: ignore realtime errors
         pass
     return {"ok": True}
 
 
 @router.post("/{shop_id}/products/create")
 async def create_product_for_shop(
-    shop_id: uuid.UUID,
+    shop_id: int,
     product_name: str = Form(...),
-    category_id: uuid.UUID | None = Form(default=None),
+    category_id: int | None = Form(default=None),
     brand: str | None = Form(default=None),
     description: str | None = Form(default=None),
     color: str | None = Form(default=None),
@@ -328,7 +464,14 @@ async def create_product_for_shop(
         raise HTTPException(status_code=404, detail="Shop not found")
 
     # Create product
-    product = Product(product_name=product_name, category_id=category_id, brand=brand, description=description, color=color)
+    # Store category as string key
+    cat_key = str(category_id) if category_id is not None else None
+    # validate category key format if provided
+    if cat_key is not None:
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9_-]{2,40}", cat_key):
+            raise HTTPException(status_code=422, detail="Invalid category ID format")
+    product = Product(product_name=product_name, category_key=cat_key, brand=brand, description=description, color=color)
     db.add(product)
     await db.flush()
 
@@ -340,17 +483,6 @@ async def create_product_for_shop(
     if file is not None:
         # Validate content type
         if file.content_type not in ("image/jpeg", "image/png", "image/webp"):
-            try:
-                db.add(AuthLog(
-                    principal_type="owner",
-                    principal_id=str(owner.owner_id),
-                    event_type="image_upload_attempt",
-                    success=False,
-                    reason="invalid_type",
-                ))
-                await db.commit()
-            except Exception:
-                pass
             raise HTTPException(status_code=400, detail="Invalid file type. Only JPG, PNG, WEBP are allowed.")
 
         # Read and size enforcement (2MB)
@@ -363,17 +495,6 @@ async def create_product_for_shop(
                 break
             total += len(chunk)
             if total > MAX_BYTES:
-                try:
-                    db.add(AuthLog(
-                        principal_type="owner",
-                        principal_id=str(owner.owner_id),
-                        event_type="image_upload_attempt",
-                        success=False,
-                        reason="too_large",
-                    ))
-                    await db.commit()
-                except Exception:
-                    pass
                 raise HTTPException(status_code=413, detail="File too large. Maximum size is 2MB.")
             chunks.append(chunk)
 
@@ -383,32 +504,10 @@ async def create_product_for_shop(
         # Magic header validation and extension determination
         magic_ext = _detect_image_magic(header)
         if not magic_ext:
-            try:
-                db.add(AuthLog(
-                    principal_type="owner",
-                    principal_id=str(owner.owner_id),
-                    event_type="image_upload_attempt",
-                    success=False,
-                    reason="invalid_magic",
-                ))
-                await db.commit()
-            except Exception:
-                pass
             raise HTTPException(status_code=400, detail="Invalid image content detected.")
 
         ct_ext = _content_type_to_ext(file.content_type)
         if not ct_ext or ct_ext != magic_ext:
-            try:
-                db.add(AuthLog(
-                    principal_type="owner",
-                    principal_id=str(owner.owner_id),
-                    event_type="image_upload_attempt",
-                    success=False,
-                    reason="type_magic_mismatch",
-                ))
-                await db.commit()
-            except Exception:
-                pass
             raise HTTPException(status_code=400, detail="File type does not match content.")
 
         # Upload to ImageKit
@@ -416,22 +515,10 @@ async def create_product_for_shop(
         if not client.is_configured():
             raise HTTPException(status_code=500, detail="ImageKit is not configured. Set IMAGEKIT_* keys in environment.")
 
-        import uuid as _uuid
-        fname = f"{_uuid.uuid4().hex}.{magic_ext}"
+        fname = f"shopprod_{int(datetime.utcnow().timestamp())}.{magic_ext}"
         try:
             result = client.upload(file_bytes=data, file_name=fname)
         except Exception:
-            try:
-                db.add(AuthLog(
-                    principal_type="owner",
-                    principal_id=str(owner.owner_id),
-                    event_type="image_upload",
-                    success=False,
-                    reason="imagekit_error",
-                ))
-                await db.commit()
-            except Exception:
-                pass
             raise HTTPException(status_code=502, detail="Failed to upload to ImageKit.")
 
         image_url = result.get("url") or result.get("filePath")
@@ -456,10 +543,40 @@ async def create_product_for_shop(
         "image_url": image_url,
     }
 
+@router.post("/manage/{shop_id}/products/create")
+async def create_product_for_shop_hex(
+    shop_id: str,
+    payload: dict,
+    db: AsyncSession = Depends(get_session),
+    owner=Depends(get_current_owner),
+):
+    sid_bytes = bytes.fromhex(shop_id)
+    oid_bytes = bytes.fromhex(owner.get("owner_id"))
+    chk = (await db.execute(text("SELECT owner_id FROM Shops WHERE shop_id = :sid"), {"sid": sid_bytes})).first()
+    if not chk or chk[0] != oid_bytes:
+        raise HTTPException(status_code=403, detail="Not authorized for this shop")
+    name = (payload.get("product_name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Product name is required")
+    prow = (await db.execute(text(
+        "INSERT INTO Products (product_id, product_name, category_key, brand, description, color, created_at) "
+        "VALUES (randomblob(16), :name, :cat_key, :brand, :desc, :color, CURRENT_TIMESTAMP) "
+        "RETURNING product_id, product_name"
+    ), {"name": name, "cat_key": (str(payload.get("category_id")) if payload.get("category_id") is not None else None), "brand": payload.get("brand"), "desc": payload.get("description"), "color": payload.get("color")})).first()
+    if not prow:
+        raise HTTPException(status_code=500, detail="Failed to create product")
+    pid = prow[0]
+    await db.execute(text(
+        "INSERT INTO Shop_Product (shop_product_id, shop_id, product_id, price, stock, created_at) "
+        "VALUES (randomblob(16), :sid, :pid, :price, :stock, CURRENT_TIMESTAMP)"
+    ), {"sid": sid_bytes, "pid": pid, "price": payload.get("price"), "stock": payload.get("stock")})
+    await db.commit()
+    return {"product_id": (pid.hex() if isinstance(pid, (bytes, bytearray)) else pid), "product_name": prow[1], "shop_id": shop_id}
+
 
 @router.post("/{shop_id}/images/upload")
 async def upload_shop_image(
-    shop_id: uuid.UUID,
+    shop_id: int,
     request: Request,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_session),
@@ -470,36 +587,10 @@ async def upload_shop_image(
 
     # Rate limiting
     if not _rate_limit_check(owner.owner_id):
-        try:
-            db.add(AuthLog(
-                principal_type="owner",
-                principal_id=str(owner.owner_id),
-                event_type="image_upload_attempt",
-                success=False,
-                reason="rate_limited",
-                ip=request.client.host if request and request.client else None,
-                user_agent=request.headers.get("user-agent") if request else None,
-            ))
-            await db.commit()
-        except Exception:
-            pass
         raise HTTPException(status_code=429, detail="Too many upload attempts. Please try again later.")
 
     # Content type validation
     if file.content_type not in ("image/jpeg", "image/png", "image/webp"):
-        try:
-            db.add(AuthLog(
-                principal_type="owner",
-                principal_id=str(owner.owner_id),
-                event_type="image_upload_attempt",
-                success=False,
-                reason="invalid_type",
-                ip=request.client.host if request and request.client else None,
-                user_agent=request.headers.get("user-agent") if request else None,
-            ))
-            await db.commit()
-        except Exception:
-            pass
         raise HTTPException(status_code=400, detail="Invalid file type. Only JPG, PNG, WEBP are allowed.")
 
     # Read and size enforcement (2MB)
@@ -512,19 +603,6 @@ async def upload_shop_image(
             break
         total += len(chunk)
         if total > MAX_BYTES:
-            try:
-                db.add(AuthLog(
-                    principal_type="owner",
-                    principal_id=str(owner.owner_id),
-                    event_type="image_upload_attempt",
-                    success=False,
-                    reason="too_large",
-                    ip=request.client.host if request and request.client else None,
-                    user_agent=request.headers.get("user-agent") if request else None,
-                ))
-                await db.commit()
-            except Exception:
-                pass
             raise HTTPException(status_code=413, detail="File too large. Maximum size is 2MB.")
         chunks.append(chunk)
 
@@ -534,36 +612,10 @@ async def upload_shop_image(
     # Magic header validation and extension determination
     magic_ext = _detect_image_magic(header)
     if not magic_ext:
-        try:
-            db.add(AuthLog(
-                principal_type="owner",
-                principal_id=str(owner.owner_id),
-                event_type="image_upload_attempt",
-                success=False,
-                reason="invalid_magic",
-                ip=request.client.host if request and request.client else None,
-                user_agent=request.headers.get("user-agent") if request else None,
-            ))
-            await db.commit()
-        except Exception:
-            pass
         raise HTTPException(status_code=400, detail="Invalid image content detected.")
 
     ct_ext = _content_type_to_ext(file.content_type)
     if not ct_ext or ct_ext != magic_ext:
-        try:
-            db.add(AuthLog(
-                principal_type="owner",
-                principal_id=str(owner.owner_id),
-                event_type="image_upload_attempt",
-                success=False,
-                reason="type_magic_mismatch",
-                ip=request.client.host if request and request.client else None,
-                user_agent=request.headers.get("user-agent") if request else None,
-            ))
-            await db.commit()
-        except Exception:
-            pass
         raise HTTPException(status_code=400, detail="File type does not match content.")
 
     # Upload to ImageKit (publicly served)
@@ -571,23 +623,10 @@ async def upload_shop_image(
     if not client.is_configured():
         raise HTTPException(status_code=500, detail="ImageKit is not configured. Set IMAGEKIT_* keys in environment.")
 
-    fname = f"{uuid.uuid4().hex}.{magic_ext}"
+    fname = f"shop_{int(datetime.utcnow().timestamp())}.{magic_ext}"
     try:
         result = client.upload(file_bytes=data, file_name=fname)
     except Exception:
-        try:
-            db.add(AuthLog(
-                principal_type="owner",
-                principal_id=str(owner.owner_id),
-                event_type="image_upload",
-                success=False,
-                reason="imagekit_error",
-                ip=request.client.host if request and request.client else None,
-                user_agent=request.headers.get("user-agent") if request else None,
-            ))
-            await db.commit()
-        except Exception:
-            pass
         raise HTTPException(status_code=502, detail="Failed to upload to ImageKit.")
 
     image_url = result.get("url") or result.get("filePath")
@@ -602,23 +641,8 @@ async def upload_shop_image(
     shop.shop_image = image_url
     await db.commit()
 
-    # Audit log: success
-    try:
-        db.add(AuthLog(
-            principal_type="owner",
-            principal_id=str(owner.owner_id),
-            event_type="image_upload",
-            success=True,
-            reason="ok",
-            ip=request.client.host if request and request.client else None,
-            user_agent=request.headers.get("user-agent") if request else None,
-        ))
-        await db.commit()
-    except Exception:
-        pass
-
     return {
-        "shop_id": str(shop_id),
+        "shop_id": shop_id,
         "file_name": fname,
         "image_url": image_url,
         "size_bytes": total,
@@ -626,38 +650,88 @@ async def upload_shop_image(
     }
 
 @router.get("/{shop_id}")
-async def shop_detail(shop_id: uuid.UUID, db: AsyncSession = Depends(get_session)):
-    from app.models.shop import ShopTiming
-    res = await db.execute(select(Shop, ShopAddress).join(ShopAddress, ShopAddress.shop_id == Shop.shop_id, isouter=True).where(Shop.shop_id == shop_id))
-    row = res.first()
+async def shop_detail(shop_id: str, db: AsyncSession = Depends(get_session)):
+    try:
+        sid_bytes = bytes.fromhex(shop_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid shop id format")
+    row = (await db.execute(text(
+        "SELECT s.shop_id, s.shop_name, s.shop_image, a.city, a.area, a.landmark, a.pincode "
+        "FROM Shops s LEFT JOIN Shop_Address a ON a.shop_id = s.shop_id "
+        "WHERE s.shop_id = :sid"
+    ), {"sid": sid_bytes})).first()
     if not row:
         raise HTTPException(status_code=404, detail="Shop not found")
-    shop, addr = row
-    timings_q = await db.execute(select(ShopTiming).where(ShopTiming.shop_id == shop_id))
-    timings = [
-        {
-            "day": t.day,
-            "opens_at": t.open_time,
-            "closes_at": t.close_time,
-        }
-        for t in timings_q.scalars().all()
-    ]
+    sid, name, img, city, area, landmark, pincode = row
     return {
-        "shop_id": shop.shop_id,
-        "shop_name": shop.shop_name,
-        "shop_image": shop.shop_image,
-        "city": getattr(addr, "city", None),
-        "area": getattr(addr, "area", None),
-        "landmark": getattr(addr, "landmark", None),
-        "pincode": getattr(addr, "pincode", None),
-        "is_open": shop.is_open(),
-        "timings": timings,
+        "shop_id": (sid.hex() if isinstance(sid, (bytes, bytearray)) else sid),
+        "shop_name": name,
+        "shop_image": img,
+        "city": city,
+        "area": area,
+        "landmark": landmark,
+        "pincode": pincode,
+        "is_open": False,
+        "timings": [],
     }
 @router.patch("/{shop_id}/availability")
-async def update_availability(shop_id: uuid.UUID, is_available: bool, owner: ShopOwner = Depends(get_current_owner), db: AsyncSession = Depends(get_session)):
+async def update_availability(shop_id: int, is_available: bool, owner: ShopOwner = Depends(get_current_owner), db: AsyncSession = Depends(get_session)):
     await ensure_owner_of_shop(shop_id, owner, db)
     stmt = update(Shop).where(Shop.shop_id == shop_id).values(shop_image=Shop.shop_image)  # no-op to ensure row exists
     await db.execute(stmt)
     # For simplicity, broadcast only; actual persisted field can be added in a future migration
     await notify_shop_update(shop_id, {"is_available": is_available})
-    return {"shop_id": str(shop_id), "is_available": is_available}
+    return {"shop_id": shop_id, "is_available": is_available}
+@router.get("/owner/products")
+async def owner_products_hex(db: AsyncSession = Depends(get_session), owner=Depends(get_current_owner), request: Request = None, response: Response = None):
+    oid_hex = owner.get("owner_id")
+    oid_bytes = bytes.fromhex(oid_hex) if isinstance(oid_hex, str) else oid_hex
+    rows = (await db.execute(text(
+        "SELECT sp.shop_product_id, s.shop_id, p.product_id, p.product_name, p.brand, sp.price, sp.stock "
+        "FROM Shop_Product sp JOIN Shops s ON sp.shop_id = s.shop_id JOIN Products p ON sp.product_id = p.product_id "
+        "WHERE s.owner_id = :oid"
+    ), {"oid": oid_bytes})).all()
+    out = []
+    for spid, sid, pid, name, brand, price, stock in rows:
+        out.append({
+            "shop_product_id": (spid.hex() if isinstance(spid, (bytes, bytearray)) else spid),
+            "shop_id": (sid.hex() if isinstance(sid, (bytes, bytearray)) else sid),
+            "product_id": (pid.hex() if isinstance(pid, (bytes, bytearray)) else pid),
+            "product_name": name,
+            "brand": brand,
+            "price": float(price) if price is not None else None,
+            "stock": stock,
+        })
+    try:
+        origin = request.headers.get("origin") if request else None
+        if origin and (origin in (settings.cors_origins or [])):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers.setdefault("Vary", "Origin")
+    except Exception:
+        pass
+    return out
+
+@router.put("/manage/{shop_id}/products/{product_id}")
+async def update_shop_product_hex(shop_id: str, product_id: str, payload: dict, db: AsyncSession = Depends(get_session), owner=Depends(get_current_owner)):
+    sid_bytes = bytes.fromhex(shop_id)
+    pid_bytes = bytes.fromhex(product_id)
+    oid_bytes = bytes.fromhex(owner.get("owner_id"))
+    chk = (await db.execute(text("SELECT owner_id FROM Shops WHERE shop_id = :sid"), {"sid": sid_bytes})).first()
+    if not chk or chk[0] != oid_bytes:
+        raise HTTPException(status_code=403, detail="Not authorized for this shop")
+    await db.execute(text("UPDATE Shop_Product SET price=:price, stock=:stock, updated_at=CURRENT_TIMESTAMP WHERE shop_id=:sid AND product_id=:pid"), {"price": payload.get("price"), "stock": payload.get("stock"), "sid": sid_bytes, "pid": pid_bytes})
+    await db.commit()
+    return {"ok": True}
+
+@router.delete("/manage/{shop_id}/products/{product_id}")
+async def delete_shop_product_hex(shop_id: str, product_id: str, db: AsyncSession = Depends(get_session), owner=Depends(get_current_owner)):
+    sid_bytes = bytes.fromhex(shop_id)
+    pid_bytes = bytes.fromhex(product_id)
+    oid_bytes = bytes.fromhex(owner.get("owner_id"))
+    chk = (await db.execute(text("SELECT owner_id FROM Shops WHERE shop_id = :sid"), {"sid": sid_bytes})).first()
+    if not chk or chk[0] != oid_bytes:
+        raise HTTPException(status_code=403, detail="Not authorized for this shop")
+    await db.execute(text("DELETE FROM Shop_Product WHERE shop_id=:sid AND product_id=:pid"), {"sid": sid_bytes, "pid": pid_bytes})
+    await db.commit()
+    return {"ok": True}

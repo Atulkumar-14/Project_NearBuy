@@ -1,8 +1,7 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request, Response
 import difflib
-import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, text
 from app.db.session import get_session
 from app.models import Product, ProductImage, SearchHistory, Shop, ShopAddress, ProductCategory, ShopProduct
 from math import radians, sin, cos, sqrt, atan2
@@ -33,40 +32,35 @@ def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 @router.get("/products")
-async def search_products(q: str, user_id: uuid.UUID | None = None, db: AsyncSession = Depends(get_session)):
-    res = await db.execute(
-        select(Product, ProductCategory)
-        .join(ProductCategory, ProductCategory.category_id == Product.category_id, isouter=True)
-        .where(Product.product_name.ilike(f"%{q}%"))
-    )
-    rows = res.all()
-    product_ids = [p.product_id for p, _ in rows]
+async def search_products(q: str, user_id: int | None = None, db: AsyncSession = Depends(get_session)):
+    rows = (await db.execute(text(
+        "SELECT product_id, product_name, brand, color FROM Products "
+        "WHERE LOWER(product_name) LIKE LOWER(:pat) "
+        "OR LOWER(brand) LIKE LOWER(:pat) "
+        "OR LOWER(description) LIKE LOWER(:pat)"
+    ), {"pat": f"%{q}%"})).all()
+    product_ids = [pid for pid, _, _, _ in rows]
     img_map = {}
     if product_ids:
         imgs = await db.execute(select(ProductImage).where(ProductImage.product_id.in_(product_ids)))
         for img in imgs.scalars().all():
-            # take first image per product
             img_map.setdefault(img.product_id, img.image_url)
     if user_id is not None:
         db.add(SearchHistory(user_id=user_id, search_item=q))
         await db.commit()
     out = []
-    for p, cat in rows:
-        name = p.product_name or ""
-        brand = p.brand or ""
-        cat_name = (cat.category_name if cat else "") or ""
+    for pid, pname, brand, color in rows:
+        name = pname or ""
+        brand_s = brand or ""
         base = score_match(name, q)
-        bonus = 0.0
-        if q.lower() in brand.lower():
-            bonus += 12.0
-        if q.lower() in cat_name.lower():
-            bonus += 10.0
+        bonus = 12.0 if q.lower() in brand_s.lower() else 0.0
+        pid_out = pid.hex() if isinstance(pid, (bytes, bytearray)) else pid
         out.append({
-            "product_id": p.product_id,
-            "product_name": p.product_name,
-            "brand": p.brand,
-            "color": p.color,
-            "image_url": img_map.get(p.product_id),
+            "product_id": pid_out,
+            "product_name": pname,
+            "brand": brand,
+            "color": color,
+            "image_url": img_map.get(pid),
             "_score": base + bonus,
         })
     out.sort(key=lambda x: x["_score"], reverse=True)
@@ -81,8 +75,11 @@ async def search_shops(q: str, db: AsyncSession = Depends(get_session)):
     rows = res.all()
     out = []
     for s, addr in rows:
+        sid = s.shop_id
+        if isinstance(sid, (bytes, bytearray)):
+            sid = sid.hex()
         out.append({
-            "shop_id": s.shop_id,
+            "shop_id": sid,
             "shop_name": s.shop_name,
             "city": addr.city,
             "area": addr.area,
@@ -95,34 +92,33 @@ async def search_shops(q: str, db: AsyncSession = Depends(get_session)):
 
 @router.get("/categories")
 async def search_by_category(q: str, db: AsyncSession = Depends(get_session)):
-    res = await db.execute(
-        select(Product, ProductCategory)
-        .join(ProductCategory, ProductCategory.category_id == Product.category_id, isouter=True)
-        .where(ProductCategory.category_name.ilike(f"%{q}%"))
-    )
-    rows = res.all()
-    product_ids = [p.product_id for p, _ in rows]
+    rows = (await db.execute(text(
+        "SELECT p.product_id, p.product_name, p.brand, p.color, c.category_name "
+        "FROM Products p LEFT JOIN Product_Categories c ON c.category_key = p.category_key "
+        "WHERE LOWER(c.category_name) LIKE LOWER(:pat)"
+    ), {"pat": f"%{q}%"})).all()
+    product_ids = [pid for pid, _, _, _, _ in rows]
     img_map = {}
     if product_ids:
         imgs = await db.execute(select(ProductImage).where(ProductImage.product_id.in_(product_ids)))
         for img in imgs.scalars().all():
             img_map.setdefault(img.product_id, img.image_url)
     out = []
-    for p, cat in rows:
+    for pid, pname, brand, color, cat_name in rows:
         out.append({
-            "product_id": p.product_id,
-            "product_name": p.product_name,
-            "brand": p.brand,
-            "color": p.color,
-            "category": cat.category_name if cat else None,
-            "image_url": img_map.get(p.product_id),
-            "_score": score_match((cat.category_name if cat else "") or "", q),
+            "product_id": (pid.hex() if isinstance(pid, (bytes, bytearray)) else pid),
+            "product_name": pname,
+            "brand": brand,
+            "color": color,
+            "category": cat_name,
+            "image_url": img_map.get(pid),
+            "_score": score_match(cat_name or "", q),
         })
     out.sort(key=lambda x: x["_score"], reverse=True)
     return [{k: v for k, v in d.items() if k != "_score"} for d in out]
 
 @router.get("/products_nearby")
-async def products_nearby(q: str | None = None, lat: float = None, lon: float = None, radius_km: float = 5.0, db: AsyncSession = Depends(get_session)):
+async def products_nearby(q: str | None = None, lat: float = None, lon: float = None, radius_km: float = 5.0, db: AsyncSession = Depends(get_session), request: Request = None, response: Response = None):
     if lat is None or lon is None:
         # fallback to normal search
         return await search_products(q or "", db=db)
@@ -138,37 +134,45 @@ async def products_nearby(q: str | None = None, lat: float = None, lon: float = 
     if not shops:
         return []
     # fetch products available in those shops
-    res2 = await db.execute(
-        select(ShopProduct, Product, ProductCategory)
-        .join(Product, Product.product_id == ShopProduct.product_id)
-        .join(ProductCategory, ProductCategory.category_id == Product.category_id, isouter=True)
-        .where(ShopProduct.shop_id.in_(shops))
+    # Build raw SQL with dynamic placeholders to avoid ORM decoding issues
+    placeholders = ", ".join([f":sid{i}" for i in range(len(shops))])
+    params = {f"sid{i}": shops[i] for i in range(len(shops))}
+    sql = (
+        f"SELECT sp.product_id, sp.price, sp.stock, p.product_name, p.brand, p.color "
+        f"FROM Shop_Product sp JOIN Products p ON sp.product_id = p.product_id "
+        f"WHERE sp.shop_id IN ({placeholders})"
     )
+    if q and q.strip():
+        params["pat"] = f"%{q}%"
+        sql += " AND (LOWER(p.product_name) LIKE LOWER(:pat) OR LOWER(p.brand) LIKE LOWER(:pat) OR LOWER(p.description) LIKE LOWER(:pat))"
+    res2 = await db.execute(text(sql), params)
     rows = res2.all()
-    product_ids = list({p.product_id for _, p, _ in rows})
+    product_ids = list({pid for pid, _, _, _, _, _ in rows})
     img_map = {}
     if product_ids:
         imgs = await db.execute(select(ProductImage).where(ProductImage.product_id.in_(product_ids)))
         for img in imgs.scalars().all():
             img_map.setdefault(img.product_id, img.image_url)
     out = []
-    for sp, p, cat in rows:
+    for pid, price, stock, pname, brand, color in rows:
         if q and q.strip():
-            name = p.product_name or ""
-            brand = p.brand or ""
-            cat_name = (cat.category_name if cat else "") or ""
+            name = pname or ""
+            brand_s = brand or ""
             base = score_match(name, q)
-            bonus = (12.0 if q.lower() in brand.lower() else 0.0) + (10.0 if q.lower() in cat_name.lower() else 0.0)
+            bonus = (12.0 if q.lower() in brand_s.lower() else 0.0)
             total = base + bonus
         else:
             # no query: prefer availability and lower price
-            total = 50.0 - (float(sp.price) if sp.price is not None else 0.0)
+            total = 50.0 - (float(price) if price is not None else 0.0)
+        pid_out = pid.hex() if isinstance(pid, (bytes, bytearray)) else pid
         out.append({
-            "product_id": p.product_id,
-            "product_name": p.product_name,
-            "brand": p.brand,
-            "color": p.color,
-            "image_url": img_map.get(p.product_id),
+            "product_id": pid_out,
+            "product_name": pname,
+            "brand": brand,
+            "color": color,
+            "price": float(price) if price is not None else None,
+            "stock": stock,
+            "image_url": img_map.get(pid),
             "_score": total,
         })
     # deduplicate by product_id keeping highest score
@@ -179,6 +183,16 @@ async def products_nearby(q: str | None = None, lat: float = None, lon: float = 
             best[pid] = d
     final = list(best.values())
     final.sort(key=lambda x: x["_score"], reverse=True)
+    try:
+        origin = request.headers.get("origin") if request else None
+        if origin:
+            response.headers.setdefault("Vary", "Origin")
+            from app.core.config import settings as _settings
+            if origin in (_settings.cors_origins or []):
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Allow-Credentials"] = "true"
+    except Exception:
+        pass
     return [{k: v for k, v in d.items() if k != "_score"} for d in final]
 
 @router.get("/popular")

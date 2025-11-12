@@ -9,10 +9,6 @@ export default function Product() {
   const navigate = useNavigate()
   const [items, setItems] = useState([])
   const [meta, setMeta] = useState(null)
-  const [file, setFile] = useState(null)
-  const [fileUrl, setFileUrl] = useState('')
-  const [uploading, setUploading] = useState(false)
-  const [uploadError, setUploadError] = useState('')
 
   useEffect(() => {
     const load = async () => {
@@ -27,13 +23,6 @@ export default function Product() {
     load()
   }, [productId])
 
-  async function uploadImage(e) {
-    e.preventDefault()
-    // Client-side policy: block uploads and show message
-    setUploadError('Image uploads are currently disabled')
-    setUploading(false)
-    return
-  }
 
   return (
     <div className="space-y-8">
@@ -76,21 +65,6 @@ export default function Product() {
         </div>
       </div>
 
-      {/* Image upload (disabled by policy) */}
-      <div>
-        <h3 className="text-xl font-semibold">Upload Image</h3>
-        <form onSubmit={uploadImage} className="mt-3 p-4 rounded-2xl bg-white shadow text-gray-900 space-y-3">
-          {uploadError && <div className="text-red-600 text-sm">{uploadError}</div>}
-          <div className="flex flex-col md:flex-row gap-3 items-center opacity-60 cursor-not-allowed">
-            <input type="file" accept="image/*" disabled onChange={e=>setFile(e.target.files?.[0] || null)} />
-            <input className="flex-1 rounded-lg border p-2 bg-[#EAF0FF] text-black" placeholder="Or paste image URL" value={fileUrl} onChange={e=>setFileUrl(e.target.value)} disabled />
-            <button type="submit" className="px-4 py-2 rounded-lg bg-primary text-white" disabled>
-              Upload
-            </button>
-          </div>
-          <div className="text-xs text-gray-600">Image uploads are currently disabled.</div>
-        </form>
-      </div>
 
       {/* Reviews placeholder */}
       <div>

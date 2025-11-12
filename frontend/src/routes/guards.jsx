@@ -2,8 +2,6 @@ import React, { useEffect, useState } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
 import axios from 'axios'
 
-const API_BASE = 'http://localhost:8000/api'
-
 export function RequireUserAuth({ children }) {
   const location = useLocation()
   const [ok, setOk] = useState(null)
@@ -11,7 +9,7 @@ export function RequireUserAuth({ children }) {
     let active = true
     const check = async () => {
       try {
-        await axios.get(`${API_BASE}/users/me`, { withCredentials: true })
+        await axios.get('/api/users/me')
         if (active) setOk(true)
       } catch {
         if (active) setOk(false)
@@ -32,7 +30,7 @@ export function RequireOwnerAuth({ children }) {
     let active = true
     const check = async () => {
       try {
-        await axios.get(`${API_BASE}/owners/me`, { withCredentials: true })
+        await axios.get('/api/owners/me')
         if (active) setOk(true)
       } catch {
         if (active) setOk(false)

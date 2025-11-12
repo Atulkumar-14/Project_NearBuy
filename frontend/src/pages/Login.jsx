@@ -11,7 +11,15 @@ export default function Login() {
   const [loading, setLoading] = useState(false)
   const navigate = useNavigate()
   const [params] = useSearchParams()
-  const { refresh } = useAuth()
+  const { refresh, user, owner, loading: authLoading } = useAuth()
+  const [error, setError] = useState('')
+
+  // If already authenticated, redirect based on role
+  React.useEffect(() => {
+    if (authLoading) return
+    if (owner) navigate('/shopkeeper/dashboard')
+    else if (user) navigate('/user/dashboard')
+  }, [owner, user, authLoading, navigate])
 
   const submit = async (e) => {
     e.preventDefault()
@@ -23,7 +31,7 @@ export default function Login() {
       const next = params.get('next')
       navigate(next || '/user/dashboard')
     } catch (e) {
-      alert(e.response?.data?.detail || 'Login failed')
+      setError(e.response?.data?.detail || 'Invalid email or password')
     } finally {
       setLoading(false)
     }
@@ -44,6 +52,7 @@ export default function Login() {
               <label className="block text-sm font-semibold mb-1">Password</label>
               <input className="w-full rounded-lg border p-2 bg-[#EAF0FF] text-black placeholder:text-gray-600" type="password" value={password} onChange={e=>setPassword(e.target.value)} required placeholder="••••••••" />
             </div>
+            {error && <div className="text-sm text-red-600">{error}</div>}
             <button className="w-full px-4 py-2 rounded-lg bg-white text-black border font-semibold" type="submit">{loading ? 'Logging in...' : 'Login'}</button>
             <div className="text-sm text-gray-700">Don't have an account? <a className="text-primary" href="/signup">Sign up</a></div>
           </form>

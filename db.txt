@@ -1,246 +1,397 @@
-from . import db
-from datetime import datetime
-
-class User(db.Model):
-    __tablename__ = 'Users'
-    
-    user_id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(150))
-    email = db.Column(db.String(200), unique=True)
-    password = db.Column(db.String(255))
-    phone = db.Column(db.String(15), unique=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
-    # Relationships
-    reviews = db.relationship('ProductReview', backref='user', lazy=True)
-    search_history = db.relationship('SearchHistory', backref='user', lazy=True)
-    
-    def __repr__(self):
-        return f'<User {self.name}>'
-
-
-        from . import db
-from datetime import datetime
-import pytz
-
-class Shop(db.Model):
-    __tablename__ = 'Shops'
-    
-    shop_id = db.Column(db.Integer, primary_key=True)
-    shop_name = db.Column(db.String(200))
-    owner_id = db.Column(db.Integer, db.ForeignKey('Shop_Owners.owner_id', ondelete='CASCADE'))
-    shop_image = db.Column(db.String(500))
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
-    # Relationships
-    address = db.relationship('ShopAddress', backref='shop', lazy=True, uselist=False)
-    timings = db.relationship('ShopTiming', backref='shop', lazy=True)
-    products = db.relationship('ShopProduct', backref='shop', lazy=True)
-    
-    def __repr__(self):
-        return f'<Shop {self.shop_name}>'
-    
-    def is_open(self):
-        """Check if shop is currently open based on current time and shop timings"""
-        if not self.timings:
-            return False
-        
-        # Get current time in India timezone
-        india_tz = pytz.timezone('Asia/Kolkata')
-        now = datetime.now(india_tz)
-        current_time = now.time()
-        current_day = now.strftime('%A')
-        
-        # Find timing for current day
-        current_timing = None
-        for timing in self.timings:
-            if timing.day.lower() == current_day.lower():
-                current_timing = timing
-                break
-        
-        if not current_timing:
-            return False
-            
-        # Check if the shop is marked as CLOSED for the day
-        if isinstance(current_timing.open_time, str) and current_timing.open_time == 'CLOSED':
-            return False
-        
-        # Handle case where open_time or close_time might be None
-        if current_timing.open_time is None or current_timing.close_time is None:
-            return False
-            
-        # Debug print to check values
-        print(f"Shop: {self.shop_name}, Day: {current_day}")
-        print(f"Current time: {current_time}")
-        print(f"Open time: {current_timing.open_time}, Close time: {current_timing.close_time}")
-            
-        # Check if current time is within open hours
-        is_open = current_timing.open_time <= current_time <= current_timing.close_time
-        print(f"Is open: {is_open}")
-        return is_open
-
-
-class ShopAddress(db.Model):
-    __tablename__ = 'Shop_Address'
-    
-    address_id = db.Column(db.Integer, primary_key=True)
-    shop_id = db.Column(db.Integer, db.ForeignKey('Shops.shop_id', ondelete='CASCADE'))
-    city = db.Column(db.String(100))
-    country = db.Column(db.String(100))
-    pincode = db.Column(db.String(10))
-    landmark = db.Column(db.String(200))
-    area = db.Column(db.String(200))
-    latitude = db.Column(db.Numeric(precision=10, scale=6))
-    longitude = db.Column(db.Numeric(precision=10, scale=6))
-    
-    def __repr__(self):
-        return f'<ShopAddress {self.area}, {self.city}>'
-
-
-class ShopTiming(db.Model):
-    __tablename__ = 'Shop_Timings'
-    
-    timing_id = db.Column(db.Integer, primary_key=True)
-    shop_id = db.Column(db.Integer, db.ForeignKey('Shops.shop_id', ondelete='CASCADE'))
-    day = db.Column(db.String(20))
-    open_time = db.Column(db.Time)
-    close_time = db.Column(db.Time)
-    
-    def __repr__(self):
-        return f'<ShopTiming {self.day}: {self.open_time}-{self.close_time}>'
-
-
-        from . import db
-
-class ShopOwner(db.Model):
-    __tablename__ = 'Shop_Owners'
-    
-    owner_id = db.Column(db.Integer, primary_key=True)
-    owner_name = db.Column(db.String(150))
-    phone = db.Column(db.String(15), unique=True)
-    email = db.Column(db.String(200), unique=True)
-    
-    # Relationships
-    shops = db.relationship('Shop', backref='owner', lazy=True)
-    
-    def __repr__(self):
-        return f'<ShopOwner {self.owner_name}>'
-
-        from . import db
-from datetime import datetime
-
-class SearchHistory(db.Model):
-    __tablename__ = 'Search_History'
-    
-    history_id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('Users.user_id', ondelete='CASCADE'))
-    search_item = db.Column(db.String(255))
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
-    
-    def __repr__(self):
-        return f'<SearchHistory {self.search_item}>'
-
-
-        from . import db
-from datetime import datetime
-
-class ProductCategory(db.Model):
-    __tablename__ = 'Product_Categories'
-    
-    category_id = db.Column(db.Integer, primary_key=True)
-    category_name = db.Column(db.String(100), unique=True)
-    category_description = db.Column(db.String(500))
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
-    # Relationships
-    products = db.relationship('Product', backref='category', lazy=True)
-    
-    def __repr__(self):
-        return f'<ProductCategory {self.category_name}>'
-
-
-class Product(db.Model):
-    __tablename__ = 'Products'
-    
-    product_id = db.Column(db.Integer, primary_key=True)
-    product_name = db.Column(db.String(200))
-    category_id = db.Column(db.Integer, db.ForeignKey('Product_Categories.category_id', ondelete='CASCADE'))
-    brand = db.Column(db.String(100))
-    description = db.Column(db.String(1000))
-    color = db.Column(db.String(50))
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
-    # Relationships
-    images = db.relationship('ProductImage', backref='product', lazy=True)
-    reviews = db.relationship('ProductReview', backref='product', lazy=True)
-    shop_products = db.relationship('ShopProduct', backref='product', lazy=True)
-    
-    def __repr__(self):
-        return f'<Product {self.product_name}>'
-
-
-class ProductImage(db.Model):
-    __tablename__ = 'Product_Images'
-    
-    image_id = db.Column(db.Integer, primary_key=True)
-    product_id = db.Column(db.Integer, db.ForeignKey('Products.product_id', ondelete='CASCADE'))
-    image_url = db.Column(db.String(500))
-    
-    def __repr__(self):
-        return f'<ProductImage {self.image_id} for product {self.product_id}>'
-
-
-class ProductReview(db.Model):
-    __tablename__ = 'Product_Reviews'
-    
-    review_id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('Users.user_id', ondelete='CASCADE'))
-    product_id = db.Column(db.Integer, db.ForeignKey('Products.product_id', ondelete='CASCADE'))
-    rating = db.Column(db.Float, db.CheckConstraint('rating BETWEEN 1.0 AND 5.0'))
-    review_text = db.Column(db.String(1000))
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
-    def __repr__(self):
-        return f'<ProductReview {self.review_id} by user {self.user_id}>'
-
-
-class ShopProduct(db.Model):
-    __tablename__ = 'Shop_Product'
-    
-    shop_product_id = db.Column(db.Integer, primary_key=True)
-    shop_id = db.Column(db.Integer, db.ForeignKey('Shops.shop_id', ondelete='CASCADE'))
-    product_id = db.Column(db.Integer, db.ForeignKey('Products.product_id', ondelete='CASCADE'))
-    price = db.Column(db.Numeric(precision=10, scale=2))
-    stock = db.Column(db.Integer)
-    
-    def __repr__(self):
-        return f'<ShopProduct {self.shop_product_id}>'
-
-        from . import db
-from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime
-
-class Admin(db.Model):
-    __tablename__ = 'admin'
-    
-    userId = db.Column(db.String(50), primary_key=True)
-    password = db.Column(db.String(255), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
-    def __init__(self, userId, password):
-        self.userId = userId
-        self.set_password(password)
-    
-    def set_password(self, password):
-        self.password = generate_password_hash(password)
-        
-    def check_password(self, password):
-        return check_password_hash(self.password, password)
-    
-    def to_dict(self):
-        return {
-            'userId': self.userId,
-            'created_at': self.created_at.isoformat() if self.created_at else None
-        }
-
-        
+USE [master]
+GO
+/****** Object:  Database [NearBuy]    Script Date: 12-11-2025 16:00:12 ******/
+CREATE DATABASE [NearBuy]
+ CONTAINMENT = NONE
+ ON  PRIMARY 
+( NAME = N'NearBuy', FILENAME = N'C:\Program Files\Microsoft SQL Server\MSSQL16.SQLEXPRESS06\MSSQL\DATA\NearBuy.mdf' , SIZE = 8192KB , MAXSIZE = UNLIMITED, FILEGROWTH = 65536KB )
+ LOG ON 
+( NAME = N'NearBuy_log', FILENAME = N'C:\Program Files\Microsoft SQL Server\MSSQL16.SQLEXPRESS06\MSSQL\DATA\NearBuy_log.ldf' , SIZE = 8192KB , MAXSIZE = 2048GB , FILEGROWTH = 65536KB )
+ WITH CATALOG_COLLATION = DATABASE_DEFAULT, LEDGER = OFF
+GO
+ALTER DATABASE [NearBuy] SET COMPATIBILITY_LEVEL = 160
+GO
+IF (1 = FULLTEXTSERVICEPROPERTY('IsFullTextInstalled'))
+begin
+EXEC [NearBuy].[dbo].[sp_fulltext_database] @action = 'enable'
+end
+GO
+ALTER DATABASE [NearBuy] SET ANSI_NULL_DEFAULT OFF 
+GO
+ALTER DATABASE [NearBuy] SET ANSI_NULLS OFF 
+GO
+ALTER DATABASE [NearBuy] SET ANSI_PADDING OFF 
+GO
+ALTER DATABASE [NearBuy] SET ANSI_WARNINGS OFF 
+GO
+ALTER DATABASE [NearBuy] SET ARITHABORT OFF 
+GO
+ALTER DATABASE [NearBuy] SET AUTO_CLOSE ON 
+GO
+ALTER DATABASE [NearBuy] SET AUTO_SHRINK OFF 
+GO
+ALTER DATABASE [NearBuy] SET AUTO_UPDATE_STATISTICS ON 
+GO
+ALTER DATABASE [NearBuy] SET CURSOR_CLOSE_ON_COMMIT OFF 
+GO
+ALTER DATABASE [NearBuy] SET CURSOR_DEFAULT  GLOBAL 
+GO
+ALTER DATABASE [NearBuy] SET CONCAT_NULL_YIELDS_NULL OFF 
+GO
+ALTER DATABASE [NearBuy] SET NUMERIC_ROUNDABORT OFF 
+GO
+ALTER DATABASE [NearBuy] SET QUOTED_IDENTIFIER OFF 
+GO
+ALTER DATABASE [NearBuy] SET RECURSIVE_TRIGGERS OFF 
+GO
+ALTER DATABASE [NearBuy] SET  ENABLE_BROKER 
+GO
+ALTER DATABASE [NearBuy] SET AUTO_UPDATE_STATISTICS_ASYNC OFF 
+GO
+ALTER DATABASE [NearBuy] SET DATE_CORRELATION_OPTIMIZATION OFF 
+GO
+ALTER DATABASE [NearBuy] SET TRUSTWORTHY OFF 
+GO
+ALTER DATABASE [NearBuy] SET ALLOW_SNAPSHOT_ISOLATION OFF 
+GO
+ALTER DATABASE [NearBuy] SET PARAMETERIZATION SIMPLE 
+GO
+ALTER DATABASE [NearBuy] SET READ_COMMITTED_SNAPSHOT OFF 
+GO
+ALTER DATABASE [NearBuy] SET HONOR_BROKER_PRIORITY OFF 
+GO
+ALTER DATABASE [NearBuy] SET RECOVERY SIMPLE 
+GO
+ALTER DATABASE [NearBuy] SET  MULTI_USER 
+GO
+ALTER DATABASE [NearBuy] SET PAGE_VERIFY CHECKSUM  
+GO
+ALTER DATABASE [NearBuy] SET DB_CHAINING OFF 
+GO
+ALTER DATABASE [NearBuy] SET FILESTREAM( NON_TRANSACTED_ACCESS = OFF ) 
+GO
+ALTER DATABASE [NearBuy] SET TARGET_RECOVERY_TIME = 60 SECONDS 
+GO
+ALTER DATABASE [NearBuy] SET DELAYED_DURABILITY = DISABLED 
+GO
+ALTER DATABASE [NearBuy] SET ACCELERATED_DATABASE_RECOVERY = OFF  
+GO
+ALTER DATABASE [NearBuy] SET QUERY_STORE = ON
+GO
+ALTER DATABASE [NearBuy] SET QUERY_STORE (OPERATION_MODE = READ_WRITE, CLEANUP_POLICY = (STALE_QUERY_THRESHOLD_DAYS = 30), DATA_FLUSH_INTERVAL_SECONDS = 900, INTERVAL_LENGTH_MINUTES = 60, MAX_STORAGE_SIZE_MB = 1000, QUERY_CAPTURE_MODE = AUTO, SIZE_BASED_CLEANUP_MODE = AUTO, MAX_PLANS_PER_QUERY = 200, WAIT_STATS_CAPTURE_MODE = ON)
+GO
+USE [NearBuy]
+GO
+/****** Object:  Table [dbo].[admin]    Script Date: 12-11-2025 16:00:13 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[admin](
+	[userId] [nvarchar](50) NOT NULL,
+	[password] [nvarchar](255) NOT NULL,
+	[created_at] [datetime] NULL,
+PRIMARY KEY CLUSTERED 
+(
+	[userId] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+/****** Object:  Table [dbo].[Log]    Script Date: 12-11-2025 16:00:13 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[Log](
+	[log_id] [int] IDENTITY(1,1) NOT NULL,
+	[user_id] [int] NULL,
+	[action_type] [nvarchar](100) NULL,
+	[description] [nvarchar](500) NULL,
+	[timestamp] [datetime] NULL,
+	[ip_address] [nvarchar](50) NULL,
+	[status_code] [int] NULL,
+PRIMARY KEY CLUSTERED 
+(
+	[log_id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+/****** Object:  Table [dbo].[Product_Categories]    Script Date: 12-11-2025 16:00:13 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[Product_Categories](
+	[category_id] [int] IDENTITY(1,1) NOT NULL,
+	[category_name] [nvarchar](100) NULL,
+	[category_description] [nvarchar](500) NULL,
+	[created_at] [datetime] NULL,
+PRIMARY KEY CLUSTERED 
+(
+	[category_id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY],
+UNIQUE NONCLUSTERED 
+(
+	[category_name] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+/****** Object:  Table [dbo].[Product_Images]    Script Date: 12-11-2025 16:00:13 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[Product_Images](
+	[image_id] [int] IDENTITY(1,1) NOT NULL,
+	[product_id] [int] NULL,
+	[image_url] [nvarchar](500) NULL,
+PRIMARY KEY CLUSTERED 
+(
+	[image_id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+/****** Object:  Table [dbo].[Product_Reviews]    Script Date: 12-11-2025 16:00:13 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[Product_Reviews](
+	[review_id] [int] IDENTITY(1,1) NOT NULL,
+	[user_id] [int] NULL,
+	[product_id] [int] NULL,
+	[rating] [decimal](2, 1) NULL,
+	[review_text] [nvarchar](1000) NULL,
+	[created_at] [datetime] NULL,
+PRIMARY KEY CLUSTERED 
+(
+	[review_id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+/****** Object:  Table [dbo].[Products]    Script Date: 12-11-2025 16:00:13 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[Products](
+	[product_id] [int] IDENTITY(1,1) NOT NULL,
+	[product_name] [nvarchar](200) NULL,
+	[category_id] [int] NULL,
+	[brand] [nvarchar](100) NULL,
+	[description] [nvarchar](1000) NULL,
+	[color] [nvarchar](50) NULL,
+	[created_at] [datetime] NULL,
+PRIMARY KEY CLUSTERED 
+(
+	[product_id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+/****** Object:  Table [dbo].[Search_History]    Script Date: 12-11-2025 16:00:13 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[Search_History](
+	[history_id] [int] IDENTITY(1,1) NOT NULL,
+	[user_id] [int] NULL,
+	[search_item] [nvarchar](255) NULL,
+	[timestamp] [datetime] NULL,
+PRIMARY KEY CLUSTERED 
+(
+	[history_id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+/****** Object:  Table [dbo].[Shop_Address]    Script Date: 12-11-2025 16:00:13 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[Shop_Address](
+	[address_id] [int] IDENTITY(1,1) NOT NULL,
+	[shop_id] [int] NULL,
+	[city] [nvarchar](100) NULL,
+	[country] [nvarchar](100) NULL,
+	[pincode] [nvarchar](10) NULL,
+	[landmark] [nvarchar](200) NULL,
+	[area] [nvarchar](200) NULL,
+	[latitude] [decimal](10, 6) NULL,
+	[longitude] [decimal](10, 6) NULL,
+PRIMARY KEY CLUSTERED 
+(
+	[address_id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+/****** Object:  Table [dbo].[Shop_Owners]    Script Date: 12-11-2025 16:00:13 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[Shop_Owners](
+	[owner_id] [int] IDENTITY(1,1) NOT NULL,
+	[owner_name] [nvarchar](150) NULL,
+	[phone] [nvarchar](15) NULL,
+	[email] [nvarchar](200) NULL,
+PRIMARY KEY CLUSTERED 
+(
+	[owner_id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY],
+UNIQUE NONCLUSTERED 
+(
+	[email] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY],
+UNIQUE NONCLUSTERED 
+(
+	[phone] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+/****** Object:  Table [dbo].[Shop_Product]    Script Date: 12-11-2025 16:00:13 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[Shop_Product](
+	[shop_product_id] [int] IDENTITY(1,1) NOT NULL,
+	[shop_id] [int] NULL,
+	[product_id] [int] NULL,
+	[price] [decimal](10, 2) NULL,
+	[stock] [int] NULL,
+PRIMARY KEY CLUSTERED 
+(
+	[shop_product_id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+/****** Object:  Table [dbo].[Shop_Timings]    Script Date: 12-11-2025 16:00:13 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[Shop_Timings](
+	[timing_id] [int] IDENTITY(1,1) NOT NULL,
+	[shop_id] [int] NULL,
+	[day] [nvarchar](20) NULL,
+	[open_time] [time](7) NULL,
+	[close_time] [time](7) NULL,
+PRIMARY KEY CLUSTERED 
+(
+	[timing_id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+/****** Object:  Table [dbo].[Shops]    Script Date: 12-11-2025 16:00:13 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[Shops](
+	[shop_id] [int] IDENTITY(1,1) NOT NULL,
+	[shop_name] [nvarchar](200) NULL,
+	[owner_id] [int] NULL,
+	[shop_image] [nvarchar](500) NULL,
+	[created_at] [datetime] NULL,
+PRIMARY KEY CLUSTERED 
+(
+	[shop_id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+/****** Object:  Table [dbo].[Users]    Script Date: 12-11-2025 16:00:13 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[Users](
+	[user_id] [int] IDENTITY(1,1) NOT NULL,
+	[name] [nvarchar](150) NULL,
+	[email] [nvarchar](200) NULL,
+	[password] [nvarchar](255) NULL,
+	[phone] [nvarchar](15) NULL,
+	[created_at] [datetime] NULL,
+PRIMARY KEY CLUSTERED 
+(
+	[user_id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY],
+UNIQUE NONCLUSTERED 
+(
+	[email] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY],
+UNIQUE NONCLUSTERED 
+(
+	[phone] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+ALTER TABLE [dbo].[admin] ADD  DEFAULT (getdate()) FOR [created_at]
+GO
+ALTER TABLE [dbo].[Log] ADD  DEFAULT (getdate()) FOR [timestamp]
+GO
+ALTER TABLE [dbo].[Log] ADD  DEFAULT ((200)) FOR [status_code]
+GO
+ALTER TABLE [dbo].[Product_Categories] ADD  DEFAULT (getdate()) FOR [created_at]
+GO
+ALTER TABLE [dbo].[Product_Reviews] ADD  DEFAULT (getdate()) FOR [created_at]
+GO
+ALTER TABLE [dbo].[Products] ADD  DEFAULT (getdate()) FOR [created_at]
+GO
+ALTER TABLE [dbo].[Search_History] ADD  DEFAULT (getdate()) FOR [timestamp]
+GO
+ALTER TABLE [dbo].[Shops] ADD  DEFAULT (getdate()) FOR [created_at]
+GO
+ALTER TABLE [dbo].[Users] ADD  DEFAULT (getdate()) FOR [created_at]
+GO
+ALTER TABLE [dbo].[Log]  WITH CHECK ADD FOREIGN KEY([user_id])
+REFERENCES [dbo].[Users] ([user_id])
+ON DELETE CASCADE
+GO
+ALTER TABLE [dbo].[Product_Images]  WITH CHECK ADD FOREIGN KEY([product_id])
+REFERENCES [dbo].[Products] ([product_id])
+ON DELETE CASCADE
+GO
+ALTER TABLE [dbo].[Product_Reviews]  WITH CHECK ADD FOREIGN KEY([product_id])
+REFERENCES [dbo].[Products] ([product_id])
+ON DELETE CASCADE
+GO
+ALTER TABLE [dbo].[Product_Reviews]  WITH CHECK ADD FOREIGN KEY([user_id])
+REFERENCES [dbo].[Users] ([user_id])
+ON DELETE CASCADE
+GO
+ALTER TABLE [dbo].[Products]  WITH CHECK ADD FOREIGN KEY([category_id])
+REFERENCES [dbo].[Product_Categories] ([category_id])
+ON DELETE CASCADE
+GO
+ALTER TABLE [dbo].[Search_History]  WITH CHECK ADD FOREIGN KEY([user_id])
+REFERENCES [dbo].[Users] ([user_id])
+ON DELETE CASCADE
+GO
+ALTER TABLE [dbo].[Shop_Address]  WITH CHECK ADD FOREIGN KEY([shop_id])
+REFERENCES [dbo].[Shops] ([shop_id])
+ON DELETE CASCADE
+GO
+ALTER TABLE [dbo].[Shop_Product]  WITH CHECK ADD FOREIGN KEY([product_id])
+REFERENCES [dbo].[Products] ([product_id])
+ON DELETE CASCADE
+GO
+ALTER TABLE [dbo].[Shop_Product]  WITH CHECK ADD FOREIGN KEY([shop_id])
+REFERENCES [dbo].[Shops] ([shop_id])
+ON DELETE CASCADE
+GO
+ALTER TABLE [dbo].[Shop_Timings]  WITH CHECK ADD FOREIGN KEY([shop_id])
+REFERENCES [dbo].[Shops] ([shop_id])
+ON DELETE CASCADE
+GO
+ALTER TABLE [dbo].[Shops]  WITH CHECK ADD FOREIGN KEY([owner_id])
+REFERENCES [dbo].[Shop_Owners] ([owner_id])
+ON DELETE CASCADE
+GO
+ALTER TABLE [dbo].[Product_Reviews]  WITH CHECK ADD CHECK  (([rating]>=(1.0) AND [rating]<=(5.0)))
+GO
+USE [master]
+GO
+ALTER DATABASE [NearBuy] SET  READ_WRITE 
+GO
+ 

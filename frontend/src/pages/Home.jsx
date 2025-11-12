@@ -16,7 +16,7 @@ export default function Home({ defaultType = 'product' }) {
   const [lon, setLon] = useState(null)
   const [radiusKm, setRadiusKm] = useState(5)
   const [nearbyShops, setNearbyShops] = useState([])
-  const [popularProducts, setPopularProducts] = useState([])
+  const [filters, setFilters] = useState({ minPrice: '', maxPrice: '', brand: '', sortBy: 'relevance' })
 
   const FALLBACK_PRODUCTS = [
     { product_id: 10001, product_name: 'iPhone 14', brand: 'Apple' },
@@ -37,29 +37,37 @@ export default function Home({ defaultType = 'product' }) {
     try {
       if (type === 'product') {
         if (city.trim()) {
-          const res = await axios.get(`${API_BASE}/products/in_city`, { params: { city, q } })
+          const res = await axios.get('/api/products/in_city', { params: { city, q } })
           // For city-filtered product search, do not fallback; show empty state instead
-          setResults(res.data || [])
+          setResults(processResults(res.data || []))
           return
         }
         const userId = localStorage.getItem('user_id')
         if (lat != null && lon != null) {
-          const res = await axios.get(`${API_BASE}/search/products_nearby`, { params: { q, lat, lon, radius_km: radiusKm } })
-          setResults(res.data?.length ? res.data : FALLBACK_PRODUCTS)
+          const res = await axios.get('/api/search/products_nearby', { params: { q, lat, lon, radius_km: radiusKm } })
+          let items = res.data || []
+          if (!items.length) {
+            const resGlobal = await axios.get('/api/search/products', { params: { q } })
+            items = resGlobal.data || []
+          }
+          setResults(processResults(items.length ? items : FALLBACK_PRODUCTS))
         } else {
-          const res = await axios.get(`${API_BASE}/search/products`, { params: { q, user_id: userId || undefined } })
-          setResults(res.data?.length ? res.data : FALLBACK_PRODUCTS)
+          const res = await axios.get('/api/search/products', { params: { q, user_id: userId || undefined } })
+          const items = res.data?.length ? res.data : FALLBACK_PRODUCTS
+          setResults(processResults(items))
         }
       } else if (type === 'category') {
-        const res = await axios.get(`${API_BASE}/search/categories`, { params: { q } })
-        setResults(res.data?.length ? res.data : FALLBACK_PRODUCTS)
+        const res = await axios.get('/api/search/categories', { params: { q } })
+        const items = res.data?.length ? res.data : FALLBACK_PRODUCTS
+        setResults(processResults(items))
       } else if (type === 'shop') {
         if (city.trim()) {
-          const res = await axios.get(`${API_BASE}/shops/by_city`, { params: { city } })
-          setResults(res.data?.length ? res.data : FALLBACK_SHOPS)
+          const res = await axios.get('/api/shops/by_city', { params: { city } })
+          setResults(processResults(res.data || []))
         } else {
-          const res = await axios.get(`${API_BASE}/search/shops`, { params: { q } })
-          setResults(res.data?.length ? res.data : FALLBACK_SHOPS)
+          const res = await axios.get('/api/search/shops', { params: { q } })
+          const items = res.data?.length ? res.data : FALLBACK_SHOPS
+          setResults(processResults(items))
         }
       }
     } catch (e) {
@@ -75,6 +83,56 @@ export default function Home({ defaultType = 'product' }) {
     }
   }
 
+  function processResults(items) {
+    const query = (q || '').trim().toLowerCase()
+    const brandFilter = (filters.brand || '').trim().toLowerCase()
+    const minP = filters.minPrice ? Number(filters.minPrice) : null
+    const maxP = filters.maxPrice ? Number(filters.maxPrice) : null
+    const withScores = items.map((item) => {
+      let name = (item.product_name || item.shop_name || '').toLowerCase()
+      let brand = (item.brand || '').toLowerCase()
+      let score = 0
+      if (query) {
+        if (name === query) score += 5
+        else if (name.startsWith(query)) score += 3
+        else if (name.includes(query)) score += 1
+        if (brand && brand === query) score += 2
+      }
+      if (city.trim() && (item.city || '').toLowerCase() === city.trim().toLowerCase()) {
+        score += 1
+      }
+      return { ...item, _score: score }
+    })
+    // Filters: brand and price if present
+    const filtered = withScores.filter((i) => {
+      if (brandFilter && !((i.brand || '').toLowerCase().includes(brandFilter))) return false
+      const price = i.price
+      if (minP != null && price != null && price < minP) return false
+      if (maxP != null && price != null && price > maxP) return false
+      return true
+    })
+    // Sorting
+    const sortBy = filters.sortBy
+    const sorted = [...filtered].sort((a, b) => {
+      if (sortBy === 'price_asc') {
+        const pa = a.price != null ? a.price : Number.POSITIVE_INFINITY
+        const pb = b.price != null ? b.price : Number.POSITIVE_INFINITY
+        return pa - pb
+      } else if (sortBy === 'price_desc') {
+        const pa = a.price != null ? a.price : Number.NEGATIVE_INFINITY
+        const pb = b.price != null ? b.price : Number.NEGATIVE_INFINITY
+        return pb - pa
+      } else if (sortBy === 'name') {
+        const na = (a.product_name || a.shop_name || '').toLowerCase()
+        const nb = (b.product_name || b.shop_name || '').toLowerCase()
+        return na.localeCompare(nb)
+      }
+      // relevance
+      return (b._score || 0) - (a._score || 0)
+    })
+    return sorted
+  }
+
   const useLocation = () => {
     // Reuse stored location if available
     const storedLat = localStorage.getItem('loc_lat')
@@ -86,10 +144,8 @@ export default function Home({ defaultType = 'product' }) {
       setLon(longitude)
       ;(async () => {
         try {
-          const res = await axios.get(`${API_BASE}/shops/nearby`, { params: { lat: latitude, lon: longitude, radius_km: radiusKm } })
+          const res = await axios.get('/api/shops/nearby', { params: { lat: latitude, lon: longitude, radius_km: radiusKm } })
           setNearbyShops(res.data || [])
-          const pop = await axios.get(`${API_BASE}/search/popular`, { params: { lat: latitude, lon: longitude, radius_km: radiusKm } })
-          setPopularProducts(pop.data || [])
         } catch {}
       })()
       return
@@ -104,10 +160,8 @@ export default function Home({ defaultType = 'product' }) {
       localStorage.setItem('loc_lon', String(longitude))
       localStorage.setItem('loc_enabled', 'true')
       try {
-        const res = await axios.get(`${API_BASE}/shops/nearby`, { params: { lat: latitude, lon: longitude, radius_km: radiusKm } })
+        const res = await axios.get('/api/shops/nearby', { params: { lat: latitude, lon: longitude, radius_km: radiusKm } })
         setNearbyShops(res.data || [])
-        const pop = await axios.get(`${API_BASE}/search/popular`, { params: { lat: latitude, lon: longitude, radius_km: radiusKm } })
-        setPopularProducts(pop.data || [])
       } catch {}
     })
   }
@@ -151,39 +205,22 @@ export default function Home({ defaultType = 'product' }) {
               <input type="range" min="1" max="50" value={radiusKm} onChange={e=>setRadiusKm(Number(e.target.value))} />
             </div>
             <button className="px-4 py-2 rounded-lg bg-[#EAF0FF] text-black border" onClick={useLocation}>Use my location</button>
+            <select className="rounded-lg bg-[#EAF0FF] text-black px-3 py-2 border" value={filters.sortBy} onChange={e=>setFilters({...filters, sortBy: e.target.value})}>
+              <option value="relevance">Sort: Relevance</option>
+              <option value="price_asc">Sort: Price ↑</option>
+              <option value="price_desc">Sort: Price ↓</option>
+              <option value="name">Sort: Name</option>
+            </select>
+            <input className="rounded-lg px-4 py-2 bg-[#EAF0FF] text-black placeholder:text-gray-600 border" placeholder="Filter by brand" value={filters.brand} onChange={e=>setFilters({...filters, brand: e.target.value})} />
+            <input className="w-28 rounded-lg px-3 py-2 bg-[#EAF0FF] text-black border" placeholder="Min ₹" value={filters.minPrice} onChange={e=>setFilters({...filters, minPrice: e.target.value})} />
+            <input className="w-28 rounded-lg px-3 py-2 bg-[#EAF0FF] text-black border" placeholder="Max ₹" value={filters.maxPrice} onChange={e=>setFilters({...filters, maxPrice: e.target.value})} />
           </div>
           <div className="mt-4 text-sm text-gray-700">
             For shopkeepers: <button className="underline text-primary" onClick={()=>navigate('/shops/add-product')}>Add your products</button>
           </div>
         </div>
       </section>
-        {popularProducts.length > 0 && (
-          <div className="mt-8">
-            <h3 className="text-lg font-semibold">Popular Near You</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mt-2">
-              {popularProducts.map((item, idx) => (
-                <div key={item.product_id || idx} className="relative rounded-2xl bg-gradient-to-br from-primary/10 to-accent/10 p-[1px] overflow-hidden hover:from-primary/20 hover:to-accent/20 transition">
-                  <div className="rounded-2xl bg-white shadow-sm hover:shadow-xl">
-                    {item.image_url ? (
-                      <img src={item.image_url} alt="popular product" className="h-44 w-full object-cover" />
-                    ) : (
-                      <div className="h-44 w-full bg-gray-100 flex items-center justify-center text-3xl font-bold text-gray-400">
-                        {(item.product_name || '?').slice(0,1).toUpperCase()}
-                      </div>
-                    )}
-                    <div className="p-4">
-                      <div className="font-semibold">{item.product_name}</div>
-                      <div className="text-sm text-gray-600">{item.brand || ''}</div>
-                    </div>
-                    <div className="p-4 pt-0">
-                      <button className="px-3 py-1 rounded-md bg-primary text-white" onClick={()=>navigate(`/products/${item.product_id}`)}>View Prices</button>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+        {/* Popular products section removed per requirements */}
         
 
       {/* Results */}
@@ -192,7 +229,7 @@ export default function Home({ defaultType = 'product' }) {
         {loading && <div className="text-sm text-gray-700">Loading...</div>}
         {searchError && <div className="text-sm text-red-600">{searchError}</div>}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {(results || []).map((item, idx) => (
+          {([...new Map((results || []).map(r => [r.product_id || r.shop_id || `${Math.random()}`, r])).values()]).map((item, idx) => (
             <div
               key={item.product_id || item.shop_id || idx}
               className="group relative rounded-2xl bg-gradient-to-br from-primary/10 to-accent/10 p-[1px] overflow-hidden hover:from-primary/20 hover:to-accent/20 transition"
@@ -204,7 +241,7 @@ export default function Home({ defaultType = 'product' }) {
             >
               <div className="rounded-2xl bg-[#EAF0FF] shadow-sm group-hover:shadow-xl text-gray-900">
                 {item.image_url || item.shop_image ? (
-                  <img src={item.image_url || item.shop_image} alt="thumbnail" className="h-44 w-full object-cover" />
+                  <img src={item.image_url || item.shop_image} alt="thumbnail" className="h-44 w-full object-cover" loading="lazy" decoding="async" />
                 ) : (
                   <div className="h-44 w-full bg-gray-100 flex items-center justify-center text-3xl font-bold text-gray-400">
                     {(item.product_name || item.shop_name || '?').slice(0,1).toUpperCase()}
@@ -217,7 +254,10 @@ export default function Home({ defaultType = 'product' }) {
                       <span className="text-xs px-2 py-1 rounded-full bg-white border text-black">{item.city}</span>
                     )}
                   </div>
-                  <div className="text-sm text-gray-800">{item.brand || `${item.city || ''} ${item.area || ''}`}</div>
+                  <div className="text-sm text-black font-semibold">{item.brand || `${item.city || ''} ${item.area || ''}`}</div>
+                  {item.price != null && (
+                    <div className="mt-1 text-[18px] leading-6 font-bold text-black transition-all duration-200 group-hover:bg-yellow-200 group-hover:scale-[1.03] inline-block rounded px-2">₹{item.price}</div>
+                  )}
                 </div>
                 <div className="mt-2 flex gap-2 p-4 pt-0">
                   {item.product_id && (
@@ -235,19 +275,19 @@ export default function Home({ defaultType = 'product' }) {
           <div className="mt-8">
             <h3 className="text-lg font-semibold">Nearby Shops</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mt-2">
-              {nearbyShops.map(s => (
+              {[...new Map(nearbyShops.map(s => [s.shop_id || `${Math.random()}`, s])).values()].map(s => (
                 <div key={s.shop_id} className="relative rounded-2xl bg-gradient-to-br from-primary/10 to-accent/10 p-[1px] overflow-hidden hover:from-primary/20 hover:to-accent/20 transition">
                   <div className="rounded-2xl bg-[#EAF0FF] shadow-sm hover:shadow-xl text-gray-900">
                     {s.shop_image ? (
-                      <img src={s.shop_image} alt="shop banner" className="h-44 w-full object-cover" />
+                      <img src={s.shop_image} alt="shop banner" className="h-44 w-full object-cover" loading="lazy" decoding="async" />
                     ) : (
                       <div className="h-44 bg-gray-100 flex items-center justify-center text-3xl font-bold text-gray-400">
                         {(s.shop_name || '?').slice(0,1).toUpperCase()}
                       </div>
                     )}
                     <div className="p-4">
-                      <div className="font-semibold">{s.shop_name}</div>
-                      <div className="text-sm text-gray-800">{s.city || ''} {s.area || ''}</div>
+                      <div className="font-bold text-black">{s.shop_name}</div>
+                      <div className="text-sm text-black font-semibold">{s.city || ''} {s.area || ''}</div>
                     </div>
                     <div className="p-4 pt-0">
                       <button className="px-3 py-1 rounded-md border" onClick={()=>navigate(`/shops/${s.shop_id}`)}>View Shop</button>
@@ -262,7 +302,7 @@ export default function Home({ defaultType = 'product' }) {
           <div className="text-gray-600">
             {type === 'product' && city.trim()
               ? `No products available in ${city}`
-              : 'No results found. Try a different keyword.'}
+              : (type === 'shop' && city.trim() ? `No shops available in ${city}` : 'No results found. Try a different keyword.')}
           </div>
         )}
       </section>

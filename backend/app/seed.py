@@ -19,6 +19,7 @@ from app.models import (
     Admin,
     OwnerSecurity,
 )
+from app.models.product import ProductPrice
 
 
 async def ensure_unique(session, model, where_clause):
@@ -134,19 +135,54 @@ async def seed_owners_and_shops(session):
                 )
             )
 
-    # Timings: Mon-Sat 10:00-21:00, Sunday Closed
+    # Timings: cap total rows to 20 across all shops to satisfy demo requirement
     days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    from sqlalchemy import func
+    total_timings = (await session.execute(select(func.count()).select_from(ShopTiming))).scalar_one()
     for shop in shop_objs:
         for d in days:
+            if total_timings >= 20:
+                break
             existing = await ensure_unique(session, ShopTiming, (ShopTiming.shop_id == shop.shop_id) & (ShopTiming.day == d))
             if not existing:
                 if d == "Sunday":
-                    # Closed (null times)
                     session.add(ShopTiming(shop_id=shop.shop_id, day=d, open_time=None, close_time=None))
                 else:
                     session.add(ShopTiming(shop_id=shop.shop_id, day=d, open_time=time(10, 0), close_time=time(21, 0)))
+                total_timings += 1
 
     return shop_objs
+
+
+async def seed_fill_to_20_shops_products(session):
+    # Ensure exactly 20 shops across allowed cities
+    allowed_cities = ["Bhopal", "Indore", "Jabalpur"]
+    res_shops = await session.execute(select(Shop))
+    shops = res_shops.scalars().all()
+    count_shops = len(shops)
+    owner = await ensure_unique(session, ShopOwner, ShopOwner.email == "seed.fill.owner@example.com")
+    if not owner:
+        owner = ShopOwner(owner_name="Seed Fill Owner", phone="9000000000", email="seed.fill.owner@example.com", password_hash=get_password_hash("Owner@123"))
+        session.add(owner)
+        await session.flush()
+        session.add(OwnerSecurity(owner_id=owner.owner_id, email_verified_at=datetime.utcnow(), phone_verified_at=datetime.utcnow()))
+    for i in range(count_shops, 20):
+        name = f"Seed Shop {i+1}"
+        shop = Shop(shop_name=name, owner_id=owner.owner_id, shop_image=None)
+        session.add(shop)
+        await session.flush()
+        city = allowed_cities[i % len(allowed_cities)]
+        session.add(ShopAddress(shop_id=shop.shop_id, city=city, country="India", pincode=f"462{100+i}", landmark=f"Landmark {i+1}", area=f"Area {i+1}", latitude=23.2300 + (i * 0.001), longitude=77.4300 + (i * 0.001)))
+
+    # Ensure exactly 20 products
+    res_prod = await session.execute(select(Product))
+    products = res_prod.scalars().all()
+    count_prod = len(products)
+    for i in range(count_prod, 20):
+        p = Product(product_name=f"Seed Product {i+1}", brand="SeedBrand", description="Seeded product", color="Color")
+        session.add(p)
+        await session.flush()
+        session.add(ProductImage(product_id=p.product_id, image_url=f"https://via.placeholder.com/600x400?text=Seed+{i+1}"))
 
 
 async def seed_shop_products(session, shops):
@@ -161,8 +197,12 @@ async def seed_shop_products(session, shops):
         "Amul Milk 1L": (62.00, 100),
         "Aashirvaad Atta 5kg": (285.00, 40),
     }
+    from sqlalchemy import func
+    total_sp = (await session.execute(select(func.count()).select_from(ShopProduct))).scalar_one()
     for shop in shops:
         for p in products:
+            if total_sp >= 20:
+                break
             existing = await ensure_unique(
                 session,
                 ShopProduct,
@@ -171,6 +211,23 @@ async def seed_shop_products(session, shops):
             if not existing:
                 price, stock = price_map.get(p.product_name, (0.0, 0))
                 session.add(ShopProduct(shop_id=shop.shop_id, product_id=p.product_id, price=price, stock=stock))
+                total_sp += 1
+
+    # Also seed ProductPrice entries to demonstrate multiple prices
+    # Ensure exactly 20 price records overall
+    res_pp = await session.execute(select(ProductPrice))
+    existing_pp = res_pp.scalars().all()
+    if len(existing_pp) < 20:
+        needed = 20 - len(existing_pp)
+        shops_cycle = shops * ((needed // max(1, len(shops))) + 1)
+        i = 0
+        for p in products:
+            if i >= needed:
+                break
+            s = shops_cycle[i]
+            base, _ = price_map.get(p.product_name, (100.0, 0))
+            session.add(ProductPrice(product_id=p.product_id, shop_id=s.shop_id, price=base + (i % 5) * 10, currency='INR'))
+            i += 1
 
 
 async def seed_users_and_admin(session):
@@ -222,10 +279,13 @@ async def run():
             await seed_images(session, products)
             shops = await seed_owners_and_shops(session)
             await session.flush()
+            # Top up to exactly 20 shops and products (and images), ensuring allowed cities
+            await seed_fill_to_20_shops_products(session)
+            await session.flush()
             await seed_shop_products(session, shops)
             await seed_users_and_admin(session)
 
-    print("Seed data inserted for Bhopal: categories, products, shops, timings, images, shop-products, users, admin.")
+    print("Seed data inserted: products, images, shops, addresses, timings, shop-products, product-prices, users, admin.")
 
 
 if __name__ == "__main__":

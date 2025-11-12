@@ -18,6 +18,11 @@ class Settings(BaseSettings):
         "http://127.0.0.1:5174",
     ]
 
+    admin_origins: List[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
     imagekit_public_key: str = ""
     imagekit_private_key: str = ""
     imagekit_url_endpoint: str = ""
