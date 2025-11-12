@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 USE [master]
 GO
 /****** Object:  Database [NearBuy]    Script Date: 12-11-2025 16:00:12 ******/
@@ -395,3 +396,253 @@ GO
 ALTER DATABASE [NearBuy] SET  READ_WRITE 
 GO
  
+=======
+from . import db
+from datetime import datetime
+
+class User(db.Model):
+    __tablename__ = 'Users'
+    
+    user_id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(150))
+    email = db.Column(db.String(200), unique=True)
+    password = db.Column(db.String(255))
+    phone = db.Column(db.String(15), unique=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    reviews = db.relationship('ProductReview', backref='user', lazy=True)
+    search_history = db.relationship('SearchHistory', backref='user', lazy=True)
+    
+    def __repr__(self):
+        return f'<User {self.name}>'
+
+
+        from . import db
+from datetime import datetime
+import pytz
+
+class Shop(db.Model):
+    __tablename__ = 'Shops'
+    
+    shop_id = db.Column(db.Integer, primary_key=True)
+    shop_name = db.Column(db.String(200))
+    owner_id = db.Column(db.Integer, db.ForeignKey('Shop_Owners.owner_id', ondelete='CASCADE'))
+    shop_image = db.Column(db.String(500))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    address = db.relationship('ShopAddress', backref='shop', lazy=True, uselist=False)
+    timings = db.relationship('ShopTiming', backref='shop', lazy=True)
+    products = db.relationship('ShopProduct', backref='shop', lazy=True)
+    
+    def __repr__(self):
+        return f'<Shop {self.shop_name}>'
+    
+    def is_open(self):
+        """Check if shop is currently open based on current time and shop timings"""
+        if not self.timings:
+            return False
+        
+        # Get current time in India timezone
+        india_tz = pytz.timezone('Asia/Kolkata')
+        now = datetime.now(india_tz)
+        current_time = now.time()
+        current_day = now.strftime('%A')
+        
+        # Find timing for current day
+        current_timing = None
+        for timing in self.timings:
+            if timing.day.lower() == current_day.lower():
+                current_timing = timing
+                break
+        
+        if not current_timing:
+            return False
+            
+        # Check if the shop is marked as CLOSED for the day
+        if isinstance(current_timing.open_time, str) and current_timing.open_time == 'CLOSED':
+            return False
+        
+        # Handle case where open_time or close_time might be None
+        if current_timing.open_time is None or current_timing.close_time is None:
+            return False
+            
+        # Debug print to check values
+        print(f"Shop: {self.shop_name}, Day: {current_day}")
+        print(f"Current time: {current_time}")
+        print(f"Open time: {current_timing.open_time}, Close time: {current_timing.close_time}")
+            
+        # Check if current time is within open hours
+        is_open = current_timing.open_time <= current_time <= current_timing.close_time
+        print(f"Is open: {is_open}")
+        return is_open
+
+
+class ShopAddress(db.Model):
+    __tablename__ = 'Shop_Address'
+    
+    address_id = db.Column(db.Integer, primary_key=True)
+    shop_id = db.Column(db.Integer, db.ForeignKey('Shops.shop_id', ondelete='CASCADE'))
+    city = db.Column(db.String(100))
+    country = db.Column(db.String(100))
+    pincode = db.Column(db.String(10))
+    landmark = db.Column(db.String(200))
+    area = db.Column(db.String(200))
+    latitude = db.Column(db.Numeric(precision=10, scale=6))
+    longitude = db.Column(db.Numeric(precision=10, scale=6))
+    
+    def __repr__(self):
+        return f'<ShopAddress {self.area}, {self.city}>'
+
+
+class ShopTiming(db.Model):
+    __tablename__ = 'Shop_Timings'
+    
+    timing_id = db.Column(db.Integer, primary_key=True)
+    shop_id = db.Column(db.Integer, db.ForeignKey('Shops.shop_id', ondelete='CASCADE'))
+    day = db.Column(db.String(20))
+    open_time = db.Column(db.Time)
+    close_time = db.Column(db.Time)
+    
+    def __repr__(self):
+        return f'<ShopTiming {self.day}: {self.open_time}-{self.close_time}>'
+
+
+        from . import db
+
+class ShopOwner(db.Model):
+    __tablename__ = 'Shop_Owners'
+    
+    owner_id = db.Column(db.Integer, primary_key=True)
+    owner_name = db.Column(db.String(150))
+    phone = db.Column(db.String(15), unique=True)
+    email = db.Column(db.String(200), unique=True)
+    
+    # Relationships
+    shops = db.relationship('Shop', backref='owner', lazy=True)
+    
+    def __repr__(self):
+        return f'<ShopOwner {self.owner_name}>'
+
+        from . import db
+from datetime import datetime
+
+class SearchHistory(db.Model):
+    __tablename__ = 'Search_History'
+    
+    history_id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('Users.user_id', ondelete='CASCADE'))
+    search_item = db.Column(db.String(255))
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    def __repr__(self):
+        return f'<SearchHistory {self.search_item}>'
+
+
+        from . import db
+from datetime import datetime
+
+class ProductCategory(db.Model):
+    __tablename__ = 'Product_Categories'
+    
+    category_id = db.Column(db.Integer, primary_key=True)
+    category_name = db.Column(db.String(100), unique=True)
+    category_description = db.Column(db.String(500))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    products = db.relationship('Product', backref='category', lazy=True)
+    
+    def __repr__(self):
+        return f'<ProductCategory {self.category_name}>'
+
+
+class Product(db.Model):
+    __tablename__ = 'Products'
+    
+    product_id = db.Column(db.Integer, primary_key=True)
+    product_name = db.Column(db.String(200))
+    category_id = db.Column(db.Integer, db.ForeignKey('Product_Categories.category_id', ondelete='CASCADE'))
+    brand = db.Column(db.String(100))
+    description = db.Column(db.String(1000))
+    color = db.Column(db.String(50))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    images = db.relationship('ProductImage', backref='product', lazy=True)
+    reviews = db.relationship('ProductReview', backref='product', lazy=True)
+    shop_products = db.relationship('ShopProduct', backref='product', lazy=True)
+    
+    def __repr__(self):
+        return f'<Product {self.product_name}>'
+
+
+class ProductImage(db.Model):
+    __tablename__ = 'Product_Images'
+    
+    image_id = db.Column(db.Integer, primary_key=True)
+    product_id = db.Column(db.Integer, db.ForeignKey('Products.product_id', ondelete='CASCADE'))
+    image_url = db.Column(db.String(500))
+    
+    def __repr__(self):
+        return f'<ProductImage {self.image_id} for product {self.product_id}>'
+
+
+class ProductReview(db.Model):
+    __tablename__ = 'Product_Reviews'
+    
+    review_id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('Users.user_id', ondelete='CASCADE'))
+    product_id = db.Column(db.Integer, db.ForeignKey('Products.product_id', ondelete='CASCADE'))
+    rating = db.Column(db.Float, db.CheckConstraint('rating BETWEEN 1.0 AND 5.0'))
+    review_text = db.Column(db.String(1000))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    def __repr__(self):
+        return f'<ProductReview {self.review_id} by user {self.user_id}>'
+
+
+class ShopProduct(db.Model):
+    __tablename__ = 'Shop_Product'
+    
+    shop_product_id = db.Column(db.Integer, primary_key=True)
+    shop_id = db.Column(db.Integer, db.ForeignKey('Shops.shop_id', ondelete='CASCADE'))
+    product_id = db.Column(db.Integer, db.ForeignKey('Products.product_id', ondelete='CASCADE'))
+    price = db.Column(db.Numeric(precision=10, scale=2))
+    stock = db.Column(db.Integer)
+    
+    def __repr__(self):
+        return f'<ShopProduct {self.shop_product_id}>'
+
+        from . import db
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime
+
+class Admin(db.Model):
+    __tablename__ = 'admin'
+    
+    userId = db.Column(db.String(50), primary_key=True)
+    password = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    def __init__(self, userId, password):
+        self.userId = userId
+        self.set_password(password)
+    
+    def set_password(self, password):
+        self.password = generate_password_hash(password)
+        
+    def check_password(self, password):
+        return check_password_hash(self.password, password)
+    
+    def to_dict(self):
+        return {
+            'userId': self.userId,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+
+python -m uvicorn main:app --reload --port 8000
+        
+>>>>>>> cd01512d8cca76b2aec1b9f64c084230c9a09919
