@@ -1,5 +1,6 @@
 from datetime import datetime
-from sqlalchemy import String, DateTime, ForeignKey, Numeric, Integer
+from typing import Optional
+from sqlalchemy import String, DateTime, ForeignKey, Numeric, Integer, LargeBinary
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -21,7 +22,6 @@ class Product(Base):
     images: Mapped[list["ProductImage"]] = relationship(back_populates="product")
     reviews: Mapped[list["ProductReview"]] = relationship(back_populates="product")
     shop_products: Mapped[list["ShopProduct"]] = relationship(back_populates="product")
-    from typing import Optional
     category: Mapped[Optional["ProductCategory"]] = relationship(back_populates="products")
 
     def __repr__(self) -> str:  # pragma: no cover
@@ -33,7 +33,7 @@ class ProductImage(Base):
 
     # db.txt: INT IDENTITY PK, product_id FK, image_url
     image_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    product_id: Mapped[int] = mapped_column(Integer, ForeignKey("Products.product_id", ondelete="CASCADE"), index=True)
+    product_id: Mapped[bytes] = mapped_column(LargeBinary, ForeignKey("Products.product_id", ondelete="CASCADE"), index=True)
     image_url: Mapped[str] = mapped_column(String(500))
 
     product: Mapped["Product"] = relationship(back_populates="images")
@@ -59,12 +59,7 @@ class ShopProduct(Base):
         return f"<ShopProduct {self.shop_product_id}>"
 
 
-"""
-DTOs for Product
-- ProductCreate: input for creating products
-- ProductRead: output model for responses
-Includes simple trimming validators.
-"""
+
 
 
 class ProductCreate(BaseModel):
@@ -104,11 +99,3 @@ class ProductRead(BaseModel):
     category_id: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
-"""
-Product-related models.
-Relationships:
-- Product 1:M ProductImage
-- Product 1:M ProductReview
-- Product M:M Shop via ShopProduct
-- Product M:1 ProductCategory
-"""

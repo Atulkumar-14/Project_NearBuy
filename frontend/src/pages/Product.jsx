@@ -40,7 +40,7 @@ export default function Product() {
           </div>
           <div className="flex-1 space-y-2">
             <div className="text-2xl font-bold">{meta?.product_name || `Product #${productId}`}</div>
-            <div className="text-sm text-gray-700">Brand: {meta?.brand || '—'} · Color: {meta?.color || '—'}</div>
+            <div className="text-[16px] font-bold text-black">Brand: {meta?.brand || '—'} · Color: {meta?.color || '—'}</div>
             <div className="mt-2 text-gray-900">{meta?.description || 'No description available.'}</div>
             <div className="mt-4">
               <button className="px-3 py-1 rounded-md bg-primary text-white" onClick={() => navigate('/products')}>Back to Products</button>

@@ -31,30 +31,17 @@ export default function Shops() {
   }
 
   useEffect(() => {
-    const storedLat = localStorage.getItem('loc_lat')
-    const storedLon = localStorage.getItem('loc_lon')
-    if (storedLat && storedLon) {
-      loadNearby(Number(storedLat), Number(storedLon))
-      return
-    }
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          localStorage.setItem('loc_lat', String(pos.coords.latitude))
-          localStorage.setItem('loc_lon', String(pos.coords.longitude))
-          localStorage.setItem('loc_enabled', 'true')
-          loadNearby(pos.coords.latitude, pos.coords.longitude)
-        },
-        () => {
-          const bhopal = { lat: 23.2599, lon: 77.4126 }
-          loadNearby(bhopal.lat, bhopal.lon)
-        },
-        { enableHighAccuracy: true, timeout: 5000 }
-      )
-    } else {
-      const bhopal = { lat: 23.2599, lon: 77.4126 }
-      loadNearby(bhopal.lat, bhopal.lon)
-    }
+    // Do not auto-use location and do not store coordinates
+    // Optionally, load all shops by default
+    (async () => {
+      setLoading(true)
+      try {
+        const res = await axios.get(`${API_BASE}/shops`)
+        setShops(res.data || [])
+      } finally {
+        setLoading(false)
+      }
+    })()
   }, [])
 
   const filtered = useMemo(() => {

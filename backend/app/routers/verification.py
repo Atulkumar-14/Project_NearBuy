@@ -50,4 +50,3 @@ async def owner_verify_phone(current_owner: ShopOwner = Depends(get_current_owne
     return {"status": "phone_verified"}
 
 
-# 2FA endpoints removed per requirements

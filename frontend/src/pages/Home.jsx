@@ -17,6 +17,7 @@ export default function Home({ defaultType = 'product' }) {
   const [radiusKm, setRadiusKm] = useState(5)
   const [nearbyShops, setNearbyShops] = useState([])
   const [filters, setFilters] = useState({ minPrice: '', maxPrice: '', brand: '', sortBy: 'relevance' })
+  const [locationEnabled, setLocationEnabled] = useState(false)
 
   const FALLBACK_PRODUCTS = [
     { product_id: 10001, product_name: 'iPhone 14', brand: 'Apple' },
@@ -43,7 +44,7 @@ export default function Home({ defaultType = 'product' }) {
           return
         }
         const userId = localStorage.getItem('user_id')
-        if (lat != null && lon != null) {
+        if (locationEnabled && lat != null && lon != null) {
           const res = await axios.get('/api/search/products_nearby', { params: { q, lat, lon, radius_km: radiusKm } })
           let items = res.data || []
           if (!items.length) {
@@ -134,31 +135,12 @@ export default function Home({ defaultType = 'product' }) {
   }
 
   const useLocation = () => {
-    // Reuse stored location if available
-    const storedLat = localStorage.getItem('loc_lat')
-    const storedLon = localStorage.getItem('loc_lon')
-    if (storedLat && storedLon) {
-      const latitude = Number(storedLat)
-      const longitude = Number(storedLon)
-      setLat(latitude)
-      setLon(longitude)
-      ;(async () => {
-        try {
-          const res = await axios.get('/api/shops/nearby', { params: { lat: latitude, lon: longitude, radius_km: radiusKm } })
-          setNearbyShops(res.data || [])
-        } catch {}
-      })()
-      return
-    }
     if (!navigator.geolocation) return
     navigator.geolocation.getCurrentPosition(async (pos) => {
       const { latitude, longitude } = pos.coords
       setLat(latitude)
       setLon(longitude)
-      // Persist to localStorage for reuse
-      localStorage.setItem('loc_lat', String(latitude))
-      localStorage.setItem('loc_lon', String(longitude))
-      localStorage.setItem('loc_enabled', 'true')
+      setLocationEnabled(true)
       try {
         const res = await axios.get('/api/shops/nearby', { params: { lat: latitude, lon: longitude, radius_km: radiusKm } })
         setNearbyShops(res.data || [])
@@ -166,28 +148,21 @@ export default function Home({ defaultType = 'product' }) {
     })
   }
 
-  // Auto-detect location and load nearby products when visiting the Products page
-  useEffect(() => {
-    if (defaultType === 'product') {
-      useLocation()
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  // Do not auto-detect location; only use when user explicitly enables via browser
 
   // When we obtain location or change radius/type, refresh nearby product results automatically
   useEffect(() => {
-    if (type === 'product') {
+    if (type === 'product' && locationEnabled) {
       if (lat != null && lon != null) {
         search()
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lat, lon, radiusKm, type])
+  }, [lat, lon, radiusKm, type, locationEnabled])
 
   return (
     <div className="space-y-8">
       {/* Hero */}
-      <section className="rounded-2xl bg-gradient-to-br from-primary/10 to-accent/10 p-[1px]">
+      <section className="rounded-2xl bg-black p-[1px]">
         <div className="rounded-2xl bg-white text-black p-8 md:p-12 shadow-sm">
           <h1 className="text-3xl md:text-5xl font-extrabold tracking-tight">Find Local Products Near You</h1>
           <p className="mt-3 text-gray-800 text-lg">Search and compare prices from nearby shops. Enter a city to browse anywhere.</p>
@@ -232,7 +207,7 @@ export default function Home({ defaultType = 'product' }) {
           {([...new Map((results || []).map(r => [r.product_id || r.shop_id || `${Math.random()}`, r])).values()]).map((item, idx) => (
             <div
               key={item.product_id || item.shop_id || idx}
-              className="group relative rounded-2xl bg-gradient-to-br from-primary/10 to-accent/10 p-[1px] overflow-hidden hover:from-primary/20 hover:to-accent/20 transition"
+              className="group relative rounded-2xl bg-black p-[1px] overflow-hidden transition"
               onClick={() => {
                 if (item.shop_id) navigate(`/shops/${item.shop_id}`)
               }}
@@ -255,6 +230,9 @@ export default function Home({ defaultType = 'product' }) {
                     )}
                   </div>
                   <div className="text-sm text-black font-semibold">{item.brand || `${item.city || ''} ${item.area || ''}`}</div>
+                  {type === 'product' && (
+                    <div className="text-sm font-bold text-black">Color: {item.color || '—'}</div>
+                  )}
                   {item.price != null && (
                     <div className="mt-1 text-[18px] leading-6 font-bold text-black transition-all duration-200 group-hover:bg-yellow-200 group-hover:scale-[1.03] inline-block rounded px-2">₹{item.price}</div>
                   )}
@@ -271,12 +249,12 @@ export default function Home({ defaultType = 'product' }) {
             </div>
           ))}
         </div>
-        {nearbyShops.length > 0 && (
+        {locationEnabled && nearbyShops.length > 0 && (
           <div className="mt-8">
             <h3 className="text-lg font-semibold">Nearby Shops</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mt-2">
               {[...new Map(nearbyShops.map(s => [s.shop_id || `${Math.random()}`, s])).values()].map(s => (
-                <div key={s.shop_id} className="relative rounded-2xl bg-gradient-to-br from-primary/10 to-accent/10 p-[1px] overflow-hidden hover:from-primary/20 hover:to-accent/20 transition">
+                <div key={s.shop_id} className="relative rounded-2xl bg-black p-[1px] overflow-hidden transition">
                   <div className="rounded-2xl bg-[#EAF0FF] shadow-sm hover:shadow-xl text-gray-900">
                     {s.shop_image ? (
                       <img src={s.shop_image} alt="shop banner" className="h-44 w-full object-cover" loading="lazy" decoding="async" />

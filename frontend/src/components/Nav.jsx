@@ -43,7 +43,7 @@ export default function Nav({ dark, setDark }) {
     <nav role="navigation" aria-label="Main" className="bg-white text-black shadow">
       <div className="max-w-7xl mx-auto px-4">
         <div className="flex items-center justify-between h-14">
-          <a href="/" className="font-bold tracking-wide">Nearbuy · Bhopal</a>
+          <a href="/" className="font-bold tracking-wide">Nearbuy</a>
           <div className="flex items-center gap-2">
             <button onClick={() => setDark(!dark)} aria-label="Toggle color scheme" className="px-3 py-1 rounded-lg border border-gray-300 bg-white text-black hover:bg-[#F3F6FF]">
               {dark ? 'Light Mode' : 'Dark Mode'}

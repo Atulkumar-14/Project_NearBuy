@@ -54,7 +54,7 @@ async def search_products(q: str, user_id: int | None = None, db: AsyncSession =
         brand_s = brand or ""
         base = score_match(name, q)
         bonus = 12.0 if q.lower() in brand_s.lower() else 0.0
-        pid_out = pid.hex() if isinstance(pid, (bytes, bytearray)) else pid
+        pid_out = _hex_or_plain(pid)
         out.append({
             "product_id": pid_out,
             "product_name": pname,
@@ -106,7 +106,7 @@ async def search_by_category(q: str, db: AsyncSession = Depends(get_session)):
     out = []
     for pid, pname, brand, color, cat_name in rows:
         out.append({
-            "product_id": (pid.hex() if isinstance(pid, (bytes, bytearray)) else pid),
+            "product_id": _hex_or_plain(pid),
             "product_name": pname,
             "brand": brand,
             "color": color,
@@ -164,7 +164,7 @@ async def products_nearby(q: str | None = None, lat: float = None, lon: float = 
         else:
             # no query: prefer availability and lower price
             total = 50.0 - (float(price) if price is not None else 0.0)
-        pid_out = pid.hex() if isinstance(pid, (bytes, bytearray)) else pid
+        pid_out = _hex_or_plain(pid)
         out.append({
             "product_id": pid_out,
             "product_name": pname,
@@ -243,3 +243,17 @@ async def popular_products(lat: float | None = None, lon: float | None = None, r
         })
     scored.sort(key=lambda x: x["_score"], reverse=True)
     return [{k: v for k, v in d.items() if k != "_score"} for d in scored[:limit]]
+def _hex_or_plain(val):
+    try:
+        import memoryview as _mv  # not real module; ignore if fails
+    except Exception:
+        pass
+    if isinstance(val, (bytes, bytearray)):
+        return val.hex()
+    try:
+        # memoryview check without importing module
+        if type(val).__name__ == 'memoryview':
+            return bytes(val).hex()
+    except Exception:
+        pass
+    return val

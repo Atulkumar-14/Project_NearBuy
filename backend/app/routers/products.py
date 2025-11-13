@@ -119,32 +119,101 @@ async def product_detail_alias(product_id: str, db: AsyncSession = Depends(get_s
 
 @router.post("/{product_id}/image")
 async def upload_product_image(
-    product_id: int,
+    product_id: str,
     file: UploadFile | None = File(default=None),
     file_url: str | None = Form(default=None),
     file_name: str | None = Form(default=None),
     db: AsyncSession = Depends(get_session),
     request: Request = None,
 ):
-    # verify product exists
-    res = await db.execute(select(Product).where(Product.product_id == product_id))
-    product = res.scalar_one_or_none()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    # Log attempted upload and reject
+    # verify product exists (hex or int)
+    pid_bytes = None
+    pid_int = None
     try:
-        db.add(Log(
-            user_id=None,
-            action_type="image_upload_attempt",
-            description="uploads_disabled",
-            ip_address=(request.client.host if request and request.client else None),
-            status_code=403,
-        ))
-        await db.commit()
-    except Exception:
-        # Non-blocking: logging should not prevent response
+        pid_bytes = bytes.fromhex(product_id)
+    except ValueError:
+        try:
+            pid_int = int(product_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid product id format")
+    if pid_bytes is not None:
+        from sqlalchemy import text
+        prow = (await db.execute(text("SELECT product_id FROM Products WHERE product_id = :pid"), {"pid": pid_bytes})).first()
+        if not prow:
+            raise HTTPException(status_code=404, detail="Product not found")
+        product_key = pid_bytes
+    else:
+        res = await db.execute(select(Product).where(Product.product_id == pid_int))
+        product = res.scalar_one_or_none()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        product_key = pid_int
+
+    # Validate input
+    if file_url and not file:
+        # allow direct URL upload via ImageKit
         pass
-    raise HTTPException(status_code=403, detail="Image uploads are currently disabled")
+    elif not file:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    # File validation
+    if file is not None:
+        if file.content_type not in ("image/jpeg", "image/png", "image/webp"):
+            raise HTTPException(status_code=400, detail="Invalid file type. Only JPG, PNG, WEBP are allowed.")
+        MAX_BYTES = 2 * 1024 * 1024
+        total = 0
+        chunks: list[bytes] = []
+        while True:
+            chunk = await file.read(64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_BYTES:
+                raise HTTPException(status_code=413, detail="File too large. Maximum size is 2MB.")
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        header = data[:12]
+        def _detect_image_magic(h: bytes) -> str | None:
+            if len(h) >= 3 and h[0:3] == b"\xFF\xD8\xFF":
+                return "jpg"
+            if len(h) >= 8 and h[0:8] == b"\x89PNG\r\n\x1a\n":
+                return "png"
+            if len(h) >= 12 and h[0:4] == b"RIFF" and h[8:12] == b"WEBP":
+                return "webp"
+            return None
+        magic_ext = _detect_image_magic(header)
+        if not magic_ext:
+            raise HTTPException(status_code=400, detail="Invalid image content detected.")
+        ct_map = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+        if ct_map.get(file.content_type) != magic_ext:
+            raise HTTPException(status_code=400, detail="File type does not match content.")
+
+    # Upload
+    try:
+        client = ImageKitClient()
+        if not client.is_configured():
+            raise HTTPException(status_code=500, detail="ImageKit is not configured. Set IMAGEKIT_* keys in environment.")
+        fname = file_name or f"product_{datetime.utcnow().timestamp()}"
+        if file is not None:
+            result = client.upload(file_bytes=data, file_name=fname)
+        else:
+            result = client.upload(file_url=file_url, file_name=fname)
+    except Exception:
+        raise HTTPException(status_code=502, detail="Failed to upload to ImageKit.")
+
+    image_url = result.get("url") or result.get("filePath")
+    if not image_url:
+        raise HTTPException(status_code=502, detail="ImageKit did not return a URL.")
+
+    # Persist ProductImage mapping
+    db.add(ProductImage(product_id=product_key, image_url=image_url))
+    # Audit log
+    try:
+        db.add(Log(user_id=None, action_type="product_image_upload", description=f"pid={product_id}", ip_address=(request.client.host if request and request.client else None), status_code=200))
+    except Exception:
+        pass
+    await db.commit()
+    return {"product_id": product_id, "image_url": image_url}
 
 
 @router.post("/create_with_image")
@@ -185,38 +254,56 @@ async def create_product_with_image(
 
 
 @router.get("/in_city")
-async def products_in_city(city: str, db: AsyncSession = Depends(get_session)):
-    # Products available (via ShopProduct) in shops located in the given city
-    # Prefer Shops.city; fall back to Shop_Address.city when Shops.city is NULL; require available stock
-    from app.models.shop import Shop, ShopAddress
-    from sqlalchemy import or_
-    stmt = (
-        select(Product, ShopProduct, Shop, ShopAddress)
-        .join(ShopProduct, ShopProduct.product_id == Product.product_id)
-        .join(Shop, Shop.shop_id == ShopProduct.shop_id)
-        .join(ShopAddress, ShopAddress.shop_id == ShopProduct.shop_id, isouter=True)
-        .where(or_(Shop.city.ilike(f"%{city}%"), ShopAddress.city.ilike(f"%{city}%")))
-        .where((ShopProduct.stock.is_not(None)) & (ShopProduct.stock > 0))
+async def products_in_city(city: str, q: str | None = None, db: AsyncSession = Depends(get_session)):
+    from sqlalchemy import text
+    city_norm = (city or "").strip()
+    if not city_norm:
+        raise HTTPException(status_code=400, detail="City is required")
+    import re
+    if not re.fullmatch(r"[A-Za-z\s\-]{2,100}", city_norm):
+        raise HTTPException(status_code=422, detail="Invalid city format")
+    exists = (await db.execute(text(
+        "SELECT 1 FROM Shops WHERE LOWER(city) = LOWER(:c) UNION SELECT 1 FROM Shop_Address WHERE LOWER(city) = LOWER(:c) LIMIT 1"
+    ), {"c": city_norm})).first()
+    if not exists:
+        raise HTTPException(status_code=404, detail="City not found")
+    sql = (
+        "SELECT p.product_id, p.product_name, p.brand, p.description, sp.price, sp.stock, a.city "
+        "FROM Shop_Product sp "
+        "JOIN Shops s ON sp.shop_id = s.shop_id "
+        "LEFT JOIN Shop_Address a ON a.shop_id = s.shop_id "
+        "JOIN Products p ON p.product_id = sp.product_id "
+        "WHERE (LOWER(s.city) = LOWER(:c) OR LOWER(a.city) = LOWER(:c)) "
+        "AND (sp.stock IS NOT NULL AND sp.stock > 0)"
     )
-    res = await db.execute(stmt)
-    rows = res.all()
+    params = {"c": city_norm}
+    if q and q.strip():
+        params["pat"] = f"%{q}%"
+        sql += " AND (LOWER(p.product_name) LIKE LOWER(:pat) OR LOWER(p.brand) LIKE LOWER(:pat) OR LOWER(p.description) LIKE LOWER(:pat))"
+    rows = (await db.execute(text(sql), params)).all()
     out = []
-    for p, sp, s, addr in rows:
-        pid = p.product_id
-        if isinstance(pid, (bytes, bytearray)):
-            pid = pid.hex()
+    def _hex_or_plain(val):
+        if isinstance(val, (bytes, bytearray)):
+            return val.hex()
+        try:
+            if type(val).__name__ == 'memoryview':
+                return bytes(val).hex()
+        except Exception:
+            pass
+        return val
+    for pid, pname, brand, desc, price, stock, c in rows:
         out.append({
-            "product_id": pid,
-            "product_name": p.product_name,
-            "brand": p.brand,
-            "price": float(sp.price) if sp.price is not None else None,
-            "stock": sp.stock,
-            "city": getattr(addr, "city", None),
+            "product_id": _hex_or_plain(pid),
+            "product_name": pname,
+            "brand": brand,
+            "description": desc,
+            "price": float(price) if price is not None else None,
+            "stock": stock,
+            "city": c,
         })
-    # deduplicate by product_id keeping the lowest price
-    dedup: dict[int, dict] = {}
+    dedup: dict[str, dict] = {}
     for item in out:
-        pid = item["product_id"]
+        pid = str(item["product_id"])
         if pid not in dedup or (
             (item["price"] is not None and (dedup[pid]["price"] is None or item["price"] < dedup[pid]["price"]))
         ):

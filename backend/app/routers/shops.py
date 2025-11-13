@@ -235,6 +235,8 @@ async def nearby_shops(lat: float, lon: float, radius_km: float = 5.0, db: Async
                 "city": addr.city,
                 "area": addr.area,
                 "shop_image": shop.shop_image,
+                "lat": lat1,
+                "lon": lon1,
             })
     return sorted(out, key=lambda x: x["distance_km"])
 
@@ -350,6 +352,10 @@ async def add_product_to_shop(
             "INSERT INTO Shop_Product (shop_product_id, shop_id, product_id, price, stock, created_at) "
             "VALUES (randomblob(16), :sid, :pid, :price, :stock, CURRENT_TIMESTAMP) ON CONFLICT(shop_id, product_id) DO UPDATE SET price=:price, stock=:stock"
         ), {"sid": sid_bytes, "pid": pid_bytes, "price": payload.price, "stock": payload.stock})
+        try:
+            db.add(Log(user_id=None, action_type="shop_product_upsert", description=f"sid={shop_id}, pid={product_id}", status_code=200))
+        except Exception:
+            pass
         await db.commit()
         return {"shop_id": shop_id, "product_id": (pid.hex() if isinstance(pid, (bytes, bytearray)) else pid), "price": payload.price, "stock": payload.stock}
     # Fallback integer handling
@@ -368,6 +374,10 @@ async def add_product_to_shop(
     else:
         sp = ShopProduct(shop_id=shop_id_int, product_id=payload.product_id, price=payload.price, stock=payload.stock)
         db.add(sp)
+    try:
+        db.add(Log(user_id=None, action_type="shop_product_upsert", description=f"sid={shop_id_int}, pid={payload.product_id}", status_code=200))
+    except Exception:
+        pass
     await db.commit()
     return {"shop_id": shop_id_int, "product_id": payload.product_id, "price": payload.price, "stock": payload.stock}
 
@@ -576,14 +586,21 @@ async def create_product_for_shop_hex(
 
 @router.post("/{shop_id}/images/upload")
 async def upload_shop_image(
-    shop_id: int,
+    shop_id: str,
     request: Request,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_session),
     owner: ShopOwner = Depends(get_current_owner),
 ):
-    # Access Control: owner must own the shop
-    await ensure_owner_of_shop(shop_id, owner, db)
+    # Access Control: owner must own the shop (hex-safe)
+    try:
+        sid_bytes = bytes.fromhex(shop_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid shop id format")
+    from sqlalchemy import text
+    row = (await db.execute(text("SELECT owner_id FROM Shops WHERE shop_id = :sid"), {"sid": sid_bytes})).first()
+    if not row or (row[0] != owner.owner_id):
+        raise HTTPException(status_code=403, detail="You are not the owner of this shop")
 
     # Rate limiting
     if not _rate_limit_check(owner.owner_id):
@@ -633,12 +650,8 @@ async def upload_shop_image(
     if not image_url:
         raise HTTPException(status_code=502, detail="ImageKit did not return a URL.")
 
-    # Persist on Shop
-    res = await db.execute(select(Shop).where(Shop.shop_id == shop_id))
-    shop = res.scalar_one_or_none()
-    if not shop:
-        raise HTTPException(status_code=404, detail="Shop not found")
-    shop.shop_image = image_url
+    # Persist on Shop (hex-safe update)
+    await db.execute(text("UPDATE Shops SET shop_image = :img WHERE shop_id = :sid"), {"img": image_url, "sid": sid_bytes})
     await db.commit()
 
     return {
@@ -721,6 +734,10 @@ async def update_shop_product_hex(shop_id: str, product_id: str, payload: dict, 
     if not chk or chk[0] != oid_bytes:
         raise HTTPException(status_code=403, detail="Not authorized for this shop")
     await db.execute(text("UPDATE Shop_Product SET price=:price, stock=:stock, updated_at=CURRENT_TIMESTAMP WHERE shop_id=:sid AND product_id=:pid"), {"price": payload.get("price"), "stock": payload.get("stock"), "sid": sid_bytes, "pid": pid_bytes})
+    try:
+        db.add(Log(user_id=None, action_type="shop_product_update", description=f"sid={shop_id}, pid={product_id}", status_code=200))
+    except Exception:
+        pass
     await db.commit()
     return {"ok": True}
 
@@ -733,5 +750,9 @@ async def delete_shop_product_hex(shop_id: str, product_id: str, db: AsyncSessio
     if not chk or chk[0] != oid_bytes:
         raise HTTPException(status_code=403, detail="Not authorized for this shop")
     await db.execute(text("DELETE FROM Shop_Product WHERE shop_id=:sid AND product_id=:pid"), {"sid": sid_bytes, "pid": pid_bytes})
+    try:
+        db.add(Log(user_id=None, action_type="shop_product_delete", description=f"sid={shop_id}, pid={product_id}", status_code=200))
+    except Exception:
+        pass
     await db.commit()
     return {"ok": True}

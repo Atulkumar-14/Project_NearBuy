@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
+from pathlib import Path
 
 
 class Settings(BaseSettings):
@@ -44,8 +45,11 @@ class Settings(BaseSettings):
     # Verification policy
     require_user_verification: bool = False
 
-    # Pydantic v2-style settings config; ignore extra env keys
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # Pydantic v2-style settings config; load env from backend/.env regardless of CWD
+    model_config = SettingsConfigDict(
+        env_file=str(Path(__file__).resolve().parent.parent.parent / ".env"),
+        extra="ignore",
+    )
 
 
 settings = Settings()

@@ -11,7 +11,7 @@ class ImageKitClient:
         self.private_key = settings.imagekit_private_key
 
     def is_configured(self) -> bool:
-        return bool(self.url_endpoint and self.private_key)
+        return bool(self.private_key)
 
     def upload(self, *, file_bytes: Optional[bytes] = None, file_url: Optional[str] = None, file_name: str = "upload.jpg") -> dict:
         if not self.is_configured():

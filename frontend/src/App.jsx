@@ -25,15 +25,9 @@ import UserProfile from './modules/user/Profile'
 import UserSettings from './pages/UserSettings'
 
 export default function App() {
-  const [dark, setDark] = useState(false)
-  useEffect(() => {
-    const root = document.documentElement
-    if (dark) root.classList.add('dark')
-    else root.classList.remove('dark')
-  }, [dark])
   return (
-    <div className="min-h-screen bg-[#1F2BD8] text-white dark:bg-gray-900 dark:text-gray-100">
-      <Nav dark={dark} setDark={setDark} />
+    <div className="min-h-screen bg-black text-white">
+      <Nav />
       <div className="p-4">
         <ErrorBoundary>
         <Routes>
@@ -47,7 +41,7 @@ export default function App() {
           <Route path="/shopkeeper/profile" element={<RequireOwnerAuth><ShopkeeperProfile /></RequireOwnerAuth>} />
           <Route path="/shops/register" element={<ShopRegister />} />
           <Route path="/shops/:shopId" element={<Shop />} />
-          <Route path="/shops/:shopId/manage" element={<ShopManage />} />
+          <Route path="/shops/:shopId/manage" element={<RequireOwnerAuth><ShopManage /></RequireOwnerAuth>} />
           <Route path="/shops/:shopId/add-product" element={<RequireOwnerAuth><ShopAddProduct /></RequireOwnerAuth>} />
           <Route path="/products/:productId" element={<Product />} />
           <Route path="/admin" element={<Admin />} />

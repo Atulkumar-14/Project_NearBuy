@@ -13,7 +13,8 @@ export default function Shop() {
   const [error, setError] = useState('')
   const navigate = useNavigate()
   const { owner } = useAuth()
-  const isOwner = !!owner
+  const [ownerShops, setOwnerShops] = useState([])
+  const isOwnerOfShop = owner && ownerShops.some(s => String(s.shop_id) === String(shopId))
 
   useEffect(() => {
     const run = async () => {
@@ -24,6 +25,15 @@ export default function Shop() {
         setShop(shopRes.data)
         const res = await axios.get(`${API_BASE}/shops/${shopId}/products`, { withCredentials: true })
         setItems(res.data || [])
+        if (owner) {
+          try {
+            const me = await axios.get(`${API_BASE}/owners/me`, { withCredentials: true })
+            const arr = Array.isArray(me.data?.shops) ? me.data.shops : []
+            setOwnerShops(arr)
+          } catch {}
+        } else {
+          setOwnerShops([])
+        }
       } catch (e) {
         const d = e?.response?.data
         const msg = (typeof d?.detail === 'string' ? d.detail : 'Failed to load products')
@@ -33,7 +43,7 @@ export default function Shop() {
       }
     }
     run()
-  }, [shopId])
+  }, [shopId, owner])
 
   return (
     <div className="space-y-6">
@@ -41,13 +51,13 @@ export default function Shop() {
       {shop?.shop_image ? (
         <img src={shop.shop_image} alt={shop.shop_name} className="h-56 w-full object-cover rounded-2xl" />
       ) : (
-        <div className="h-56 w-full rounded-2xl bg-gradient-to-r from-primary to-accent text-white flex items-center justify-center text-3xl font-bold">
+        <div className="h-56 w-full rounded-2xl bg-black text-white flex items-center justify-center text-3xl font-bold">
           {shop?.shop_name || 'Shop'}
         </div>
       )}
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">{shop?.shop_name || 'Shop Products'}</h1>
-        {isOwner && (
+        {isOwnerOfShop && (
           <div className="flex gap-2">
             <button className="px-3 py-2 rounded-lg border" onClick={()=>navigate(`/shops/${shopId}/manage`)}>Manage Shop</button>
             <button className="px-3 py-2 rounded-lg bg-white text-black border" onClick={()=>navigate(`/shops/${shopId}/add-product`)}>Add Product</button>
@@ -89,13 +99,13 @@ export default function Shop() {
               <div className="font-bold text-black text-lg">{item.product_name}</div>
               <div className="text-sm text-black font-semibold">{item.brand}</div>
               <div className="mt-2">
-                <span className="text-xl font-bold">₹{item.price}</span>
+                <span className="text-xl font-bold text-black">₹{item.price}</span>
                 {item.stock != null && (
                   <span className={`ml-2 text-xs px-2 py-1 rounded ${item.stock>0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{item.stock>0 ? 'In stock' : 'Out of stock'}</span>
                 )}
               </div>
               <div className="mt-4 flex gap-2">
-                <button className="px-3 py-2 rounded-lg bg-primary text-white" onClick={()=>navigate(`/products/${item.product_id}`)}>Compare Prices</button>
+                <button className="px-3 py-2 rounded-lg bg-primary text-red-500" onClick={()=>navigate(`/products/${item.product_id}`)}>Compare Prices</button>
               </div>
             </div>
           </div>
