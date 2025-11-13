@@ -10,6 +10,15 @@ import { AuthProvider } from './components/AuthProvider.jsx'
 // Global axios defaults: base URL and credentials
 axios.defaults.baseURL = 'http://localhost:8000'
 axios.defaults.withCredentials = true
+// Persist Authorization across reloads using stored owner/user tokens
+try {
+  const ownerTok = window.localStorage.getItem('owner_token')
+  const userTok = window.localStorage.getItem('access_token')
+  const tok = ownerTok || userTok
+  if (tok) {
+    axios.defaults.headers.common['Authorization'] = `Bearer ${tok}`
+  }
+} catch {}
 let __refreshing = null
 axios.interceptors.response.use(
   (res) => res,

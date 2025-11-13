@@ -53,6 +53,7 @@ export function AuthProvider({ children }) {
     setOwner(null);
     window.localStorage.removeItem('access_token');
     window.localStorage.removeItem('owner_token');
+    try { delete axios.defaults.headers.common['Authorization']; } catch {}
     window.dispatchEvent(new CustomEvent('auth:logout'));
   }, []);
 
