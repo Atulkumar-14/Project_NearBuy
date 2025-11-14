@@ -9,8 +9,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 class Product(Base):
     __tablename__ = "Products"
 
-    # db.txt: INT IDENTITY PK, FK to Product_Categories, created_at default
-    product_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    product_id: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
     product_name: Mapped[str] = mapped_column(String(200))
     category_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("Product_Categories.category_id", ondelete="CASCADE"), index=True)
     category_key: Mapped[str | None] = mapped_column(String(100), index=True)
@@ -45,10 +44,9 @@ class ProductImage(Base):
 class ShopProduct(Base):
     __tablename__ = "Shop_Product"
 
-    # db.txt: INT IDENTITY PK, shop_id FK, product_id FK, price, stock
-    shop_product_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    shop_id: Mapped[int] = mapped_column(Integer, ForeignKey("Shops.shop_id", ondelete="CASCADE"), index=True)
-    product_id: Mapped[int] = mapped_column(Integer, ForeignKey("Products.product_id", ondelete="CASCADE"), index=True)
+    shop_product_id: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+    shop_id: Mapped[bytes] = mapped_column(LargeBinary, ForeignKey("Shops.shop_id", ondelete="CASCADE"), index=True)
+    product_id: Mapped[bytes] = mapped_column(LargeBinary, ForeignKey("Products.product_id", ondelete="CASCADE"), index=True)
     price: Mapped[float | None] = mapped_column(Numeric(precision=10, scale=2))
     stock: Mapped[int | None] = mapped_column(Integer)
 

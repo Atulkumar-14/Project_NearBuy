@@ -55,7 +55,7 @@ export default function Product() {
         <div className="mt-3 space-y-2">
           {items.map((i, idx) => (
             <div key={idx} className="p-4 rounded-2xl bg-white shadow flex items-center justify-between text-gray-900">
-              <div className="font-medium">{i.shop_name}</div>
+              <button className="font-medium text-primary hover:underline" onClick={() => navigate(`/shops/${i.shop_id}`)}>{i.shop_name}</button>
               <div className="text-sm">{i.price != null ? `₹${i.price}` : 'N/A'} · Stock: {i.stock ?? 'N/A'}</div>
             </div>
           ))}

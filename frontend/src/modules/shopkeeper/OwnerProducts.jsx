@@ -6,6 +6,8 @@ import { useAuth } from '../../components/AuthProvider.jsx'
 export default function OwnerProducts() {
   const { owner } = useAuth()
   const [items, setItems] = useState([])
+  const [shops, setShops] = useState([])
+  const [selectedShopId, setSelectedShopId] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
@@ -16,8 +18,16 @@ export default function OwnerProducts() {
     try {
       const res = await axios.get(`${API_BASE}/shops/owner/products`, { withCredentials: true })
       const arr = Array.isArray(res.data) ? res.data : []
-      const unique = [...new Map(arr.map(it => [it.shop_product_id, it])).values()]
+      const unique = [...new Map(arr.map(it => [`${it.shop_product_id}`, it])).values()]
       setItems(unique)
+      // also load owner shops for filtering
+      try {
+        const me = await axios.get(`${API_BASE}/owners/me`, { withCredentials: true })
+        const s = Array.isArray(me.data?.shops) ? me.data.shops : []
+        const uniqShops = [...new Map(s.map(x => [String(x.shop_id), x])).values()]
+        setShops(uniqShops)
+        if (!selectedShopId && uniqShops.length) setSelectedShopId('')
+      } catch {}
     } catch (e) {
       const d = e?.response?.data
       const code = e?.response?.status
@@ -59,6 +69,17 @@ export default function OwnerProducts() {
       <div className="rounded-2xl bg-white text-gray-900 p-6">
         <div className="text-sm uppercase tracking-wide text-accent">Inventory</div>
         <h1 className="text-2xl font-bold">Your Products</h1>
+        {shops.length > 0 && (
+          <div className="mt-3 flex items-center gap-2">
+            <label className="text-sm text-gray-700">Filter by shop:</label>
+            <select className="px-2 py-1 rounded border bg-white" value={selectedShopId} onChange={e=>setSelectedShopId(e.target.value)}>
+              <option value="">All shops</option>
+              {shops.map(s => (
+                <option key={String(s.shop_id)} value={String(s.shop_id)}>{s.shop_name}</option>
+              ))}
+            </select>
+          </div>
+        )}
         {error && <div className="mt-3 p-2 rounded border bg-red-50 text-red-700 text-sm">{error}</div>}
         {success && <div className="mt-3 p-2 rounded border bg-green-50 text-green-700 text-sm">{success}</div>}
         {loading ? (
@@ -76,7 +97,7 @@ export default function OwnerProducts() {
               </tr>
             </thead>
             <tbody>
-              {items.map((it) => (
+              {(selectedShopId ? items.filter(it => String(it.shop_id) === String(selectedShopId)) : items).map((it) => (
                 <tr key={it.shop_product_id} className="border-t">
                   <td className="p-2">{it.product_name}</td>
                   <td className="p-2">{it.brand || '-'}</td>

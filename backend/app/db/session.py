@@ -1,12 +1,25 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy import event
+from pathlib import Path
 from app.core.config import settings
 from app.db.base import Base
 from app.models import *  # noqa: F401,F403 ensure models are imported
 
 
+_db_url = settings.database_url
+try:
+    if _db_url.startswith("sqlite+aiosqlite:///"):
+        rel = _db_url.split("sqlite+aiosqlite:///", 1)[1]
+        p = Path(rel)
+        if not p.is_absolute():
+            base = Path(__file__).resolve().parent.parent.parent
+            abs_path = (base / rel).resolve()
+            _db_url = f"sqlite+aiosqlite:///{abs_path.as_posix()}"
+except Exception:
+    pass
+
 engine = create_async_engine(
-    settings.database_url,
+    _db_url,
     echo=False,
     future=True,
     connect_args={"timeout": 10.0},
